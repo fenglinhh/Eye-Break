@@ -76,13 +76,8 @@ final class DailyBreakModel: ObservableObject {
         tickTimer = timer
     }
 
-    func pauseThirtyMinutes() {
-        engine.pause(minutes: 30)
-        syncFromEngine()
-    }
-
-    func pauseUntilTomorrow() {
-        engine.pauseUntilTomorrow()
+    func pause() {
+        engine.pause()
         syncFromEngine()
     }
 
@@ -101,8 +96,8 @@ final class DailyBreakModel: ObservableObject {
         syncFromEngine()
     }
 
-    func postponeOneMinute() {
-        engine.postpone(minutes: 1)
+    func resetWorkCycle() {
+        engine.resetWorkCycle()
         syncFromEngine()
     }
 
@@ -120,7 +115,7 @@ final class DailyBreakModel: ObservableObject {
         case .resting(let kind):
             return kind == .short ? "短休息中" : "长休息中"
         case .paused:
-            return "已暂停 · 剩余 \(formatDuration(remainingSeconds))"
+            return "已暂停 \(formatDuration(engine.totalPausedSeconds)) · 剩余 \(formatDuration(remainingSeconds))"
         case .systemAway:
             return "锁屏或睡眠暂停中"
         case .postponed:
@@ -133,7 +128,7 @@ final class DailyBreakModel: ObservableObject {
         case .inactive:
             return "休息"
         case .paused:
-            return "暂停 \(formatDuration(remainingSeconds))"
+            return "暂停 \(formatDuration(engine.totalPausedSeconds))"
         case .preBreak:
             return "\(remainingSeconds)秒"
         case .resting:
@@ -143,11 +138,11 @@ final class DailyBreakModel: ObservableObject {
         }
     }
 
-    var canPostponeBreak: Bool {
+    var canResetWorkCycle: Bool {
         switch phase {
-        case .working, .preBreak, .resting:
+        case .working, .preBreak, .postponed:
             return true
-        case .inactive, .paused, .systemAway, .postponed:
+        case .inactive, .resting, .paused, .systemAway:
             return false
         }
     }
@@ -155,9 +150,6 @@ final class DailyBreakModel: ObservableObject {
     private func bindServices() {
         overlayController.onSkip = { [weak self] in
             Task { @MainActor in self?.skipBreak() }
-        }
-        overlayController.onPostpone = { [weak self] in
-            Task { @MainActor in self?.postponeOneMinute() }
         }
         systemMonitor.onAway = { [weak self] in
             Task { @MainActor in

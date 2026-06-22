@@ -41,33 +41,45 @@ final class SystemActivityMonitor {
     var onAway: (() -> Void)?
     var onReturn: (() -> Void)?
 
-    private var observers: [NSObjectProtocol] = []
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var distributedObservers: [NSObjectProtocol] = []
 
     func start() {
-        let center = NSWorkspace.shared.notificationCenter
-        observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(workspaceCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.onAway?()
         })
-        observers.append(center.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+        workspaceObservers.append(workspaceCenter.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.onAway?()
         })
-        observers.append(center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        workspaceObservers.append(workspaceCenter.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.onAway?()
         })
-        observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+        workspaceObservers.append(workspaceCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.onReturn?()
         })
-        observers.append(center.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+        workspaceObservers.append(workspaceCenter.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.onReturn?()
         })
-        observers.append(center.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        workspaceObservers.append(workspaceCenter.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.onReturn?()
+        })
+
+        let distributedCenter = DistributedNotificationCenter.default()
+        distributedObservers.append(distributedCenter.addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.onAway?()
+        })
+        distributedObservers.append(distributedCenter.addObserver(forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
             self?.onReturn?()
         })
     }
 
     deinit {
-        for observer in observers {
+        for observer in workspaceObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        for observer in distributedObservers {
+            DistributedNotificationCenter.default().removeObserver(observer)
         }
     }
 }
@@ -82,7 +94,6 @@ final class RestOverlayController {
     private var retiredEntries: [OverlayEntry] = []
 
     var onSkip: (() -> Void)?
-    var onPostpone: (() -> Void)?
 
     func show(state: RestOverlayState) {
         close()
@@ -90,8 +101,7 @@ final class RestOverlayController {
             let model = RestOverlayWindowModel(
                 state: state,
                 isPrimary: index == 0,
-                onSkip: { [weak self] in self?.onSkip?() },
-                onPostpone: { [weak self] in self?.onPostpone?() }
+                onSkip: { [weak self] in self?.onSkip?() }
             )
             let window = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false, screen: screen)
             window.contentView = NSHostingView(rootView: RestOverlayView(model: model))

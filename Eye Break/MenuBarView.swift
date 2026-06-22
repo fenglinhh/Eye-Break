@@ -22,32 +22,30 @@ struct MenuBarView: View {
                     performAndClose(model.resume)
                 }
             } else {
-                Button("暂停 30 分钟") {
-                    performAndClose(model.pauseThirtyMinutes)
+                Button("暂停") {
+                    performAndClose(model.pause)
                 }
             }
 
             Button("立即休息") {
                 performAndClose(model.startBreakNow)
             }
-            Button("跳过本次休息") {
-                performAndClose(model.skipBreak)
-            }
-                .disabled(!model.settings.allowSkip)
-            Button("延后 1 分钟") {
-                performAndClose(model.postponeOneMinute)
-            }
-                .disabled(!model.canPostponeBreak)
-            Button("暂停至明天") {
-                performAndClose(model.pauseUntilTomorrow)
+
+            if model.phase != .paused {
+                Button("重置") {
+                    performAndClose(model.resetWorkCycle)
+                }
+                .disabled(!model.canResetWorkCycle)
             }
 
             Divider()
 
             Button("打开设置") {
-                openSettings()
-                NSApplication.shared.activate(ignoringOtherApps: true)
                 closeMenuWindow()
+                DispatchQueue.main.async {
+                    openSettings()
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                }
             }
             Button("退出 Daily Break") {
                 NSApplication.shared.terminate(nil)
@@ -76,8 +74,5 @@ struct MenuBarView: View {
 
     private func closeMenuWindow() {
         dismiss()
-        DispatchQueue.main.async {
-            NSApplication.shared.keyWindow?.performClose(nil)
-        }
     }
 }

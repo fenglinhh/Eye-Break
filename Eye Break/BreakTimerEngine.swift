@@ -20,8 +20,11 @@ struct BreakTimerEngine {
     private var restDeadline: Date?
     private var pauseStartedAt: Date?
     private var pausedRemainingSeconds: Int?
-    private var awayStartedAt: Date?
+    private var pausedPhase: BreakPhase?
+    private var pausedBreakKind: BreakKind?
     private var awayRemainingSeconds: Int?
+    private var awayPhase: BreakPhase?
+    private var awayBreakKind: BreakKind?
     private var preBreakNotificationSent = false
 
     init(settings: BreakSettings, now: @escaping () -> Date = Date.init, calendar: Calendar = .current) {
@@ -83,25 +86,32 @@ struct BreakTimerEngine {
         }
     }
 
-    mutating func pause(minutes: Int) {
-        guard phase == .working || phase == .preBreak || phase == .postponed else { return }
+    mutating func pause() {
+        guard canFreeze(phase) else { return }
+        pausedPhase = phase
+        if case let .resting(kind) = phase {
+            pausedBreakKind = kind
+        } else {
+            pausedBreakKind = nil
+        }
         pausedRemainingSeconds = remainingSeconds
         pauseStartedAt = now()
+        totalPausedSeconds = 0
         phase = .paused
         shouldShowOverlay = false
         workDeadline = nil
-    }
-
-    mutating func pauseUntilTomorrow() {
-        pause(minutes: minutesUntilTomorrow())
+        restDeadline = nil
     }
 
     mutating func resume() {
         guard phase == .paused else { return }
         updatePauseAccounting()
-        startWorkCycle(duration: pausedRemainingSeconds ?? settings.workDurationSeconds)
+        resumeFrozenPhase(pausedPhase, remaining: pausedRemainingSeconds ?? settings.workDurationSeconds, breakKind: pausedBreakKind)
         pauseStartedAt = nil
         pausedRemainingSeconds = nil
+        pausedPhase = nil
+        pausedBreakKind = nil
+        totalPausedSeconds = 0
     }
 
     mutating func startBreakNow() {
@@ -126,34 +136,42 @@ struct BreakTimerEngine {
         startWorkCycle(duration: settings.workDurationSeconds)
     }
 
+    mutating func resetWorkCycle() {
+        guard phase == .working || phase == .preBreak || phase == .postponed else { return }
+        startWorkCycle(duration: settings.workDurationSeconds)
+    }
+
     mutating func systemWillSleepOrLock() {
         guard settings.pauseOnLock else { return }
-        guard phase == .working || phase == .preBreak || phase == .postponed else { return }
-        awayStartedAt = now()
+        guard canFreeze(phase) else { return }
+        awayPhase = phase
+        if case let .resting(kind) = phase {
+            awayBreakKind = kind
+        } else {
+            awayBreakKind = nil
+        }
         awayRemainingSeconds = remainingSeconds
         phase = .systemAway
         shouldShowOverlay = false
         workDeadline = nil
+        restDeadline = nil
     }
 
     mutating func systemDidWakeOrUnlock() {
         guard phase == .systemAway else { return }
-        let awaySeconds = Int(now().timeIntervalSince(awayStartedAt ?? now()))
         let rememberedRemaining = awayRemainingSeconds ?? settings.workDurationSeconds
-        awayStartedAt = nil
+        let rememberedPhase = awayPhase
+        let rememberedBreakKind = awayBreakKind
         awayRemainingSeconds = nil
+        awayPhase = nil
+        awayBreakKind = nil
 
         guard isActiveTime(now()) else {
             becomeInactive()
             return
         }
 
-        if settings.resetAfterLongAway && awaySeconds >= rememberedRemaining {
-            shouldShowOverlay = false
-            startWorkCycle(duration: settings.workDurationSeconds)
-        } else {
-            startWorkCycle(duration: rememberedRemaining)
-        }
+        resumeFrozenPhase(rememberedPhase, remaining: rememberedRemaining, breakKind: rememberedBreakKind)
     }
 
     mutating func consumeToast() -> String? {
@@ -188,6 +206,31 @@ struct BreakTimerEngine {
     private var isResting: Bool {
         if case .resting = phase { return true }
         return false
+    }
+
+    private func canFreeze(_ phase: BreakPhase) -> Bool {
+        switch phase {
+        case .working, .preBreak, .resting, .postponed:
+            return true
+        case .inactive, .paused, .systemAway:
+            return false
+        }
+    }
+
+    private mutating func resumeFrozenPhase(_ frozenPhase: BreakPhase?, remaining: Int, breakKind: BreakKind?) {
+        switch frozenPhase {
+        case .resting:
+            resumeRest(kind: breakKind ?? currentBreakKind, duration: remaining)
+        case .preBreak, .postponed:
+            startWorkCycle(duration: remaining)
+            if remaining <= 30 {
+                phase = .preBreak
+            }
+        case .working:
+            startWorkCycle(duration: remaining)
+        case .inactive, .paused, .systemAway, .none:
+            startWorkCycle(duration: remaining)
+        }
     }
 
     private mutating func updateWorkCountdown() {
@@ -264,6 +307,17 @@ struct BreakTimerEngine {
         preBreakNotificationSent = false
     }
 
+    private mutating func resumeRest(kind: BreakKind, duration: Int) {
+        currentBreakKind = kind
+        phase = .resting(kind)
+        remainingSeconds = max(1, duration)
+        restDeadline = now().addingTimeInterval(TimeInterval(remainingSeconds))
+        workDeadline = nil
+        shouldShowOverlay = true
+        shouldSendPreBreakNotification = false
+        preBreakNotificationSent = false
+    }
+
     private mutating func completeRest() {
         switch currentBreakKind {
         case .short:
@@ -329,11 +383,6 @@ struct BreakTimerEngine {
             }
         }
         return nil
-    }
-
-    private func minutesUntilTomorrow() -> Int {
-        let startOfTomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now())) ?? now().addingTimeInterval(24 * 60 * 60)
-        return max(1, Int(ceil(startOfTomorrow.timeIntervalSince(now()) / 60)))
     }
 
     private func skipMessage(for count: Int) -> String {

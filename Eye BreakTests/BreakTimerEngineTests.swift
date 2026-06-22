@@ -73,14 +73,33 @@ final class BreakTimerEngineTests: XCTestCase {
         engine.startIfAllowed()
         clock.advance(by: 5 * 60)
         engine.tick()
-        engine.pause(minutes: 30)
+        engine.pause()
         clock.advance(by: 10 * 60)
         engine.tick()
         engine.resume()
 
         XCTAssertEqual(engine.phase, .working)
         XCTAssertEqual(engine.remainingSeconds, 15 * 60)
-        XCTAssertEqual(engine.totalPausedSeconds, 10 * 60)
+        XCTAssertEqual(engine.totalPausedSeconds, 0)
+    }
+
+    func testManualPauseAndResumePreservesRestCountdown() {
+        var clock = TestClock(now: mondayMorning)
+        var engine = BreakTimerEngine(settings: .testDefaults, now: { clock.now })
+
+        engine.startIfAllowed()
+        clock.advance(by: 20 * 60)
+        engine.tick()
+        clock.advance(by: 5)
+        engine.tick()
+        engine.pause()
+        clock.advance(by: 10 * 60)
+        engine.tick()
+        engine.resume()
+
+        XCTAssertEqual(engine.phase, .resting(.short))
+        XCTAssertEqual(engine.remainingSeconds, 15)
+        XCTAssertTrue(engine.shouldShowOverlay)
     }
 
     func testStartBreakNowImmediatelyStartsShortRestAndShowsOverlay() {
@@ -96,35 +115,6 @@ final class BreakTimerEngineTests: XCTestCase {
         XCTAssertEqual(engine.remainingSeconds, 20)
         XCTAssertTrue(engine.shouldShowOverlay)
         XCTAssertFalse(engine.shouldSendPreBreakNotification)
-    }
-
-    func testPostponeAddsOneMinuteAndReturnsToPreBreak() {
-        var clock = TestClock(now: mondayMorning)
-        var engine = BreakTimerEngine(settings: .testDefaults, now: { clock.now })
-
-        engine.startIfAllowed()
-        clock.advance(by: 19 * 60 + 30)
-        engine.tick()
-        engine.postpone(minutes: 1)
-        clock.advance(by: 60)
-        engine.tick()
-
-        XCTAssertEqual(engine.phase, .preBreak)
-        XCTAssertEqual(engine.remainingSeconds, 30)
-    }
-
-    func testPostponeFromRestingHidesOverlayAndStartsPostponedCountdown() {
-        var clock = TestClock(now: mondayMorning)
-        var engine = BreakTimerEngine(settings: .testDefaults, now: { clock.now })
-
-        engine.startIfAllowed()
-        clock.advance(by: 20 * 60)
-        engine.tick()
-        engine.postpone(minutes: 1)
-
-        XCTAssertEqual(engine.phase, .postponed)
-        XCTAssertEqual(engine.remainingSeconds, 90)
-        XCTAssertFalse(engine.shouldShowOverlay)
     }
 
     func testSkipStartsNextWorkCycleAndUpdatesMessagingThreshold() {
@@ -160,7 +150,7 @@ final class BreakTimerEngineTests: XCTestCase {
         XCTAssertEqual(engine.remainingSeconds, 15 * 60)
     }
 
-    func testSystemAwayLongerThanRemainingWorkTimeStartsFreshWorkCycleWithoutOverlay() {
+    func testSystemAwayLongerThanRemainingWorkTimeResumesUnchanged() {
         var clock = TestClock(now: mondayMorning)
         var engine = BreakTimerEngine(settings: .testDefaults, now: { clock.now })
 
@@ -172,13 +162,26 @@ final class BreakTimerEngineTests: XCTestCase {
         engine.systemDidWakeOrUnlock()
 
         XCTAssertEqual(engine.phase, .working)
-        XCTAssertEqual(engine.remainingSeconds, 20 * 60)
+        XCTAssertEqual(engine.remainingSeconds, 2 * 60)
         XCTAssertFalse(engine.shouldShowOverlay)
+    }
+
+    func testResetWorkCycleRestartsCountdownFromConfiguredDuration() {
+        var clock = TestClock(now: mondayMorning)
+        var engine = BreakTimerEngine(settings: .testDefaults, now: { clock.now })
+
+        engine.startIfAllowed()
+        clock.advance(by: 12 * 60 + 43)
+        engine.tick()
+        engine.resetWorkCycle()
+
+        XCTAssertEqual(engine.phase, .working)
+        XCTAssertEqual(engine.remainingSeconds, 20 * 60)
     }
 
     func testOutsideActiveHoursIsInactiveAndReportsNextStart() {
         let beforeWork = mondayMorning.addingTimeInterval(-2 * 60 * 60)
-        var clock = TestClock(now: beforeWork)
+        let clock = TestClock(now: beforeWork)
         var engine = BreakTimerEngine(settings: .testDefaults, now: { clock.now })
 
         engine.startIfAllowed()

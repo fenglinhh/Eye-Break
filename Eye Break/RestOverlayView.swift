@@ -7,13 +7,11 @@ final class RestOverlayWindowModel: ObservableObject {
     @Published private(set) var actionRequested = false
     let isPrimary: Bool
     private let onSkip: () -> Void
-    private let onPostpone: () -> Void
 
-    init(state: RestOverlayState, isPrimary: Bool, onSkip: @escaping () -> Void, onPostpone: @escaping () -> Void) {
+    init(state: RestOverlayState, isPrimary: Bool, onSkip: @escaping () -> Void) {
         self.state = state
         self.isPrimary = isPrimary
         self.onSkip = onSkip
-        self.onPostpone = onPostpone
     }
 
     func skip() {
@@ -24,13 +22,6 @@ final class RestOverlayWindowModel: ObservableObject {
         }
     }
 
-    func postpone() {
-        guard !actionRequested else { return }
-        actionRequested = true
-        DispatchQueue.main.async { [onPostpone] in
-            onPostpone()
-        }
-    }
 }
 
 struct RestOverlayView: View {
@@ -80,7 +71,6 @@ struct RestOverlayView: View {
             }
             HStack(spacing: 12) {
                 Button("跳过", action: model.skip)
-                Button("延后 1 分钟", action: model.postpone)
             }
             .controlSize(.large)
             .disabled(model.actionRequested)
