@@ -8,7 +8,18 @@
 
 /* Begin PBXFileReference section */
 		52BD52A82FE9257B009EB58B /* Eye Break.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Eye Break.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		52BD52C82FE9257B009EB58B /* Eye BreakTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Eye BreakTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXContainerItemProxy section */
+		52BD52C92FE9257B009EB58B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 52BD52A02FE9257B009EB58B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 52BD52A72FE9257B009EB58B;
+			remoteInfo = "Eye Break";
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		52BD52AA2FE9257B009EB58B /* Eye Break */ = {
@@ -16,10 +27,22 @@
 			path = "Eye Break";
 			sourceTree = "<group>";
 		};
+		52BD52CA2FE9257B009EB58B /* Eye BreakTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "Eye BreakTests";
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		52BD52A52FE9257B009EB58B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		52BD52CD2FE9257B009EB58B /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -33,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				52BD52AA2FE9257B009EB58B /* Eye Break */,
+				52BD52CA2FE9257B009EB58B /* Eye BreakTests */,
 				52BD52A92FE9257B009EB58B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +65,7 @@
 			isa = PBXGroup;
 			children = (
 				52BD52A82FE9257B009EB58B /* Eye Break.app */,
+				52BD52C82FE9257B009EB58B /* Eye BreakTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -69,6 +94,29 @@
 			productName = "Eye Break";
 			productReference = 52BD52A82FE9257B009EB58B /* Eye Break.app */;
 			productType = "com.apple.product-type.application";
+		};
+		52BD52CB2FE9257B009EB58B /* Eye BreakTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 52BD52D02FE9257B009EB58B /* Build configuration list for PBXNativeTarget "Eye BreakTests" */;
+			buildPhases = (
+				52BD52CC2FE9257B009EB58B /* Sources */,
+				52BD52CD2FE9257B009EB58B /* Frameworks */,
+				52BD52CE2FE9257B009EB58B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				52BD52CF2FE9257B009EB58B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				52BD52CA2FE9257B009EB58B /* Eye BreakTests */,
+			);
+			name = "Eye BreakTests";
+			packageProductDependencies = (
+			);
+			productName = "Eye BreakTests";
+			productReference = 52BD52C82FE9257B009EB58B /* Eye BreakTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -100,12 +148,20 @@
 			projectRoot = "";
 			targets = (
 				52BD52A72FE9257B009EB58B /* Eye Break */,
+				52BD52CB2FE9257B009EB58B /* Eye BreakTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		52BD52A62FE9257B009EB58B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		52BD52CE2FE9257B009EB58B /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -122,7 +178,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		52BD52CC2FE9257B009EB58B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		52BD52CF2FE9257B009EB58B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 52BD52A72FE9257B009EB58B /* Eye Break */;
+			targetProxy = 52BD52C92FE9257B009EB58B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		52BD52B32FE9257B009EB58B /* Debug */ = {
@@ -259,6 +330,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -291,6 +363,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -306,6 +379,52 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		52BD52D12FE9257B009EB58B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7PD6S6APHU;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.flynn.Eye-BreakTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eye Break.app/Contents/MacOS/Eye Break";
+				WRAPPER_EXTENSION = xctest;
+			};
+			name = Debug;
+		};
+		52BD52D22FE9257B009EB58B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7PD6S6APHU;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.flynn.Eye-BreakTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eye Break.app/Contents/MacOS/Eye Break";
+				WRAPPER_EXTENSION = xctest;
 			};
 			name = Release;
 		};
@@ -326,6 +445,15 @@
 			buildConfigurations = (
 				52BD52B62FE9257B009EB58B /* Debug */,
 				52BD52B72FE9257B009EB58B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		52BD52D02FE9257B009EB58B /* Build configuration list for PBXNativeTarget "Eye BreakTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				52BD52D12FE9257B009EB58B /* Debug */,
+				52BD52D22FE9257B009EB58B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

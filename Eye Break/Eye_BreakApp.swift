@@ -5,28 +5,43 @@
 //  Created by Flynn on 22/6/26.
 //
 
+import AppKit
 import SwiftUI
-import SwiftData
 
 @main
 struct Eye_BreakApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @StateObject private var model = DailyBreakModel()
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            MenuBarView(model: model)
+                .onAppear {
+                    model.start()
+                }
+        } label: {
+            Group {
+                if model.settings.menuBarCountdownEnabled {
+                    Text(model.menuBarTitle)
+                        .monospacedDigit()
+                } else {
+                    Image(systemName: "eye")
+                }
+            }
+            .onAppear {
+                model.start()
+            }
         }
-        .modelContainer(sharedModelContainer)
+        .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(model: model)
+                .onAppear {
+                    model.start()
+                }
+        }
+    }
+
+    init() {
+        NSApplication.shared.setActivationPolicy(.accessory)
     }
 }
