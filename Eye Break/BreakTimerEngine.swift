@@ -1,38 +1,111 @@
+//
+//  BreakTimerEngine.swift
+//  Eye Break
+//
+//  职责：应用核心状态机，管理休息提醒的完整生命周期（工作→预提醒→休息→工作）。
+//  通过构造函数注入 now() 和 Calendar 实现与真实时钟的解耦，便于纯逻辑测试。
+//  所有外部副作用（通知、UI 展示）交由调用方处理，本文件只管理状态转换。
+//  依赖：BreakSettings, BreakPhase, BreakKind, AdviceLibrary (无 SwiftUI/AppKit)
+//  被使用：DailyBreakModel（唯一 @MainActor 调用方）
+//
+
 import Foundation
 
+/// 纯值类型状态机 — 管理所有阶段转换，无 UI 依赖。
+///
+/// 逻辑：
+/// 1. 外部每秒调用 tick() 驱动状态机
+/// 2. 通过 phase 枚举追踪当前阶段
+/// 3. workDeadline / restDeadline 两个时间戳作为倒计时基准
+/// 4. 每个 public mutating 方法对应一个操作（暂停/恢复/跳过/延后/启动休息）
+/// 5. private 辅助方法处理各阶段的具体倒计时逻辑
 struct BreakTimerEngine {
-    private(set) var phase: BreakPhase = .inactive
-    private(set) var remainingSeconds: Int = 0
-    private(set) var todayShortBreaks: Int = 0
-    private(set) var todayLongBreaks: Int = 0
-    private(set) var consecutiveSkips: Int = 0
-    private(set) var totalPausedSeconds: Int = 0
-    private(set) var shouldShowOverlay = false
-    private(set) var shouldSendPreBreakNotification = false
-    private(set) var lastToastMessage: String?
-    private(set) var nextActiveStart: Date?
-    private(set) var currentBreakKind: BreakKind = .short
+    // MARK: - 公开状态属性（只读）
 
+    /// 当前阶段（inactive / working / preBreak / resting / paused / postponed / systemAway）
+    private(set) var phase: BreakPhase = .inactive
+    /// 当前阶段剩余秒数
+    private(set) var remainingSeconds: Int = 0
+    /// 今日已完成短休息次数（只统计完整完成的休息，用于菜单和持久化展示）
+    private(set) var todayShortBreaks: Int = 0
+    /// 今日已完成长休息次数
+    private(set) var todayLongBreaks: Int = 0
+    /// 连续跳过休息次数（影响 toast 文案语气）
+    private(set) var consecutiveSkips: Int = 0
+    /// 本次暂停累计秒数（仅 paused 状态有效）
+    private(set) var totalPausedSeconds: Int = 0
+    /// 是否应展示全屏休息蒙层（调用方据此调度 overlay 显示/隐藏）
+    private(set) var shouldShowOverlay = false
+    /// 是否应发送预提醒通知（调用方消费后清除）
+    private(set) var shouldSendPreBreakNotification = false
+    /// 上一条 toast 消息（跳过/延后时生成，调用方消费后清除）
+    private(set) var lastToastMessage: String?
+    /// 非活跃时间段结束后，下一次自动开始的时间（仅 inactive 有效）
+    private(set) var nextActiveStart: Date?
+    /// 当前休息类型（short / long），用于 restDeadline 和 overlay 展示
+    private(set) var currentBreakKind: BreakKind = .short
+    /// 历史休息触发记录（完成和跳过都会记录，用于长休息周期计算）
+    private(set) var restHistory: [BreakKind] = []
+
+    /// 用户配置（注入后可变，调用 updateSettings 同步变更）
     var settings: BreakSettings
+
+    // MARK: - 注入依赖（测试隔离）
+
+    /// 返回当前时间的闭包（生产环境为 Date.init，测试环境可注入 TestClock）
     private var now: () -> Date
+    /// 日历实例（用于日期边界检查，如活跃时间段、工作日判断）
     private var calendar: Calendar
+
+    // MARK: - 工作/休息倒计时基准（私有）
+
+    /// 工作阶段倒计时终点时间戳（working / preBreak / postponed 共享）
     private var workDeadline: Date?
+    /// 休息阶段倒计时终点时间戳（resting 使用）
     private var restDeadline: Date?
+
+    // MARK: - 暂停冻结状态缓存
+
+    /// 暂停开始的时间戳（用于计算 totalPausedSeconds）
     private var pauseStartedAt: Date?
+    /// 暂停前的剩余秒数（恢复时还原）
     private var pausedRemainingSeconds: Int?
+    /// 暂停前的阶段（恢复时还原）
     private var pausedPhase: BreakPhase?
+    /// 暂停前的休息类型（仅在 pausedPhase 为 resting 时有意义）
     private var pausedBreakKind: BreakKind?
+
+    // MARK: - 系统离场冻结状态缓存
+
+    /// 系统离场前的剩余秒数（唤醒后还原）
     private var awayRemainingSeconds: Int?
+    /// 系统离场前的阶段
     private var awayPhase: BreakPhase?
+    /// 系统离场前的休息类型
     private var awayBreakKind: BreakKind?
+    /// 离场开始时间戳（用于计算 awayDuration）
+    private var awayStartedAt: Date?
+    /// 标记 preBreak 通知是否已发送，防止重复（每个工作周期重置）
     private var preBreakNotificationSent = false
 
+    // MARK: - 初始化
+
+    /// 创建引擎实例。
+    /// - 参数 now: 获取当前时间的闭包，默认 Date.init
+    /// - 参数 calendar: 日历实例，默认 .current
     init(settings: BreakSettings, now: @escaping () -> Date = Date.init, calendar: Calendar = .current) {
         self.settings = settings
         self.now = now
         self.calendar = calendar
     }
 
+    // MARK: - 设置同步
+
+    /// 更新配置并在必要时限制已有倒计时不超过新值。
+    ///
+    /// 逻辑：
+    /// 1. 保存新配置到 self.settings
+    /// 2. 如果当前在 working/preBreak 阶段，将剩余时间限制为不超过新的工作时长
     mutating func updateSettings(_ settings: BreakSettings) {
         self.settings = settings
         if phase == .working || phase == .preBreak {
@@ -40,16 +113,35 @@ struct BreakTimerEngine {
         }
     }
 
+    // MARK: - 持久化恢复
+
+    /// 从持久化统计快照恢复今日数据（应用启动时调用）。
     mutating func restoreStats(_ stats: BreakStats) {
         todayShortBreaks = stats.shortBreaks
         todayLongBreaks = stats.longBreaks
         consecutiveSkips = stats.consecutiveSkips
+        restHistory = stats.restHistory
     }
 
+    /// 将当前引擎状态导出为持久化统计快照。
     var stats: BreakStats {
-        BreakStats(dayKey: BreakStats.dayKey(for: now(), calendar: calendar), shortBreaks: todayShortBreaks, longBreaks: todayLongBreaks, consecutiveSkips: consecutiveSkips)
+        BreakStats(
+            dayKey: BreakStats.dayKey(for: now(), calendar: calendar),
+            shortBreaks: todayShortBreaks,
+            longBreaks: todayLongBreaks,
+            consecutiveSkips: consecutiveSkips,
+            restHistory: restHistory
+        )
     }
 
+    // MARK: - 启动入口
+
+    /// 尝试启动工作周期（应用启动时或每日首次调用）。
+    ///
+    /// 逻辑：
+    /// 1. 检查当前时间是否在活跃时间段内；如果不是，进入 inactive
+    /// 2. 如果引擎不在 inactive 状态（已启动），退化为 tick() 更新倒计时
+    /// 3. 如果是首次启动（inactive），调用 startWorkCycle 开始新工作周期
     mutating func startIfAllowed() {
         guard isActiveTime(now()) else {
             becomeInactive()
@@ -62,6 +154,20 @@ struct BreakTimerEngine {
         startWorkCycle(duration: settings.workDurationSeconds)
     }
 
+    // MARK: - 核心循环（每秒调用）
+
+    /// 每秒调用的主状态机驱动。
+    ///
+    /// 逻辑：
+    /// 1. 先检查活跃时间段，不在活跃时间段内则进入 inactive
+    /// 2. 重置 shouldSendPreBreakNotification 标志（每 tick 先清空，由各阶段逻辑按需置位）
+    /// 3. 根据当前 phase 分发到对应的倒计时更新方法
+    ///   - working/preBreak → updateWorkCountdown()
+    ///   - resting → updateRestCountdown()
+    ///   - paused → updatePauseAccounting()（只累加暂停时长，不倒计时）
+    ///   - postponed → updatePostponedCountdown()
+    ///   - systemAway → 不做任何事（时间冻结）
+    ///   - inactive → 自动开始新周期
     mutating func tick() {
         guard isActiveTime(now()) else {
             becomeInactive()
@@ -86,6 +192,15 @@ struct BreakTimerEngine {
         }
     }
 
+    // MARK: - 手动暂停/恢复
+
+    /// 手动暂停当前阶段。
+    ///
+    /// 逻辑：
+    /// 1. 检查当前阶段是否允许暂停（working/preBreak/resting/postponed 可暂停）
+    /// 2. 缓存当前阶段、剩余秒数、休息类型到 paused* 变量
+    /// 3. 记录暂停开始时间戳，重置 totalPausedSeconds
+    /// 4. 切换到 paused 阶段，关闭 overlay 并清除 deadline
     mutating func pause() {
         guard canFreeze(phase) else { return }
         pausedPhase = phase
@@ -103,6 +218,12 @@ struct BreakTimerEngine {
         restDeadline = nil
     }
 
+    /// 从暂停恢复。
+    ///
+    /// 逻辑：
+    /// 1. 先 updatePauseAccounting 累计暂停时长
+    /// 2. 根据缓存的原阶段调用 resumeFrozenPhase 恢复倒计时
+    /// 3. 清除暂停缓存变量
     mutating func resume() {
         guard phase == .paused else { return }
         updatePauseAccounting()
@@ -114,10 +235,26 @@ struct BreakTimerEngine {
         totalPausedSeconds = 0
     }
 
+    // MARK: - 休息操作
+
+    /// 立即开始休息（跳过 preBreak 等待）。
+    ///
+    /// 逻辑：
+    /// 1. 如果已经在休息状态，直接返回
+    /// 2. 使用 nextBreakKind() 确定休息类型（短休息/长休息）
+    /// 3. 不发送 preBreak 通知（因用户主动发起）
     mutating func startBreakNow() {
-        startRest(kind: .short, sendMissedPreBreakNotification: false)
+        guard !isResting else { return }
+        startRest(kind: nextBreakKind(), sendMissedPreBreakNotification: false)
     }
 
+    /// 延后本次休息提醒。
+    ///
+    /// 逻辑：
+    /// 1. 仅在 preBreak/working/resting 状态下允许
+    /// 2. 设置剩余时间为 30 秒 + 延后分钟数（最小 1 分钟）
+    /// 3. 切换到 postponed 阶段，关闭 overlay
+    /// 4. 重置 preBreakNotificationSent 以允许在 postponed 结束后再次发通知
     mutating func postpone(minutes: Int) {
         guard phase == .preBreak || phase == .working || isResting else { return }
         let added = max(1, minutes) * 60
@@ -128,19 +265,42 @@ struct BreakTimerEngine {
         preBreakNotificationSent = false
     }
 
+    /// 跳过当前休息（计入触发历史和连续跳过次数，但不计入已完成统计）。
+    ///
+    /// 逻辑：
+    /// 1. 如果尚未进入休息阶段，按下一次休息类型记录一次触发
+    /// 2. 已进入休息阶段时，触发历史已在 startRest 记录，不重复记录
+    /// 3. 递增 consecutiveSkips，生成对应程度的 toast 文案
+    /// 4. 立即开始新的工作周期
     mutating func skipBreak() {
         guard phase == .preBreak || isResting || phase == .working || phase == .postponed else { return }
+        if !isResting {
+            recordRestTrigger(nextBreakKind())
+        }
         consecutiveSkips += 1
         lastToastMessage = skipMessage(for: consecutiveSkips)
         shouldShowOverlay = false
         startWorkCycle(duration: settings.workDurationSeconds)
     }
 
+    // MARK: - 工作周期重置
+
+    /// 重置工作倒计时（重新开始一轮工作）。
+    /// 仅在 working / preBreak / postponed 阶段可用。
     mutating func resetWorkCycle() {
         guard phase == .working || phase == .preBreak || phase == .postponed else { return }
         startWorkCycle(duration: settings.workDurationSeconds)
     }
 
+    // MARK: - 系统事件处理
+
+    /// 系统即将睡眠或锁屏时调用。
+    ///
+    /// 逻辑：
+    /// 1. 如果设置 pauseOnLock 关闭，直接返回
+    /// 2. 检查当前阶段是否允许冻结（同 pause 条件）
+    /// 3. 缓存当前阶段、剩余秒数、休息类型到 away* 变量
+    /// 4. 切换到 systemAway 阶段，关闭 overlay
     mutating func systemWillSleepOrLock() {
         guard settings.pauseOnLock else { return }
         guard canFreeze(phase) else { return }
@@ -151,45 +311,88 @@ struct BreakTimerEngine {
             awayBreakKind = nil
         }
         awayRemainingSeconds = remainingSeconds
+        awayStartedAt = now()
         phase = .systemAway
         shouldShowOverlay = false
         workDeadline = nil
         restDeadline = nil
     }
 
+    /// 系统唤醒或解锁后恢复。
+    ///
+    /// 逻辑：
+    /// 1. 根据缓存的原阶段走不同恢复分支：
+    ///    - resting：扣除 awayDuration 后继续休息；如果超时则完成休息
+    ///    - working/preBreak/postponed：如果 resetAfterLongAway 开启且 awayDuration >= 剩余时间 → 重启工作周期；否则恢复倒计时
+    ///    - 其他阶段：直接恢复倒计时
+    /// 2. 如果唤醒时不在活跃时段，进入 inactive
     mutating func systemDidWakeOrUnlock() {
         guard phase == .systemAway else { return }
         let rememberedRemaining = awayRemainingSeconds ?? settings.workDurationSeconds
         let rememberedPhase = awayPhase
         let rememberedBreakKind = awayBreakKind
+        let awayDuration = awayStartedAt.map { Int(now().timeIntervalSince($0)) } ?? 0
         awayRemainingSeconds = nil
         awayPhase = nil
         awayBreakKind = nil
+        awayStartedAt = nil
 
         guard isActiveTime(now()) else {
             becomeInactive()
             return
         }
 
-        resumeFrozenPhase(rememberedPhase, remaining: rememberedRemaining, breakKind: rememberedBreakKind)
+        switch rememberedPhase {
+        case .resting:
+            // 休息阶段：扣除离场时间后继续剩余休息；如果离场已经够久，直接完成休息
+            let remainingAfterAway = rememberedRemaining - awayDuration
+            currentBreakKind = rememberedBreakKind ?? currentBreakKind
+            if remainingAfterAway <= 0 {
+                completeRest()
+            } else {
+                resumeRest(kind: currentBreakKind, duration: remainingAfterAway)
+            }
+        case .working, .preBreak, .postponed:
+            // 工作阶段：如果设置了长时间离场重置且离场时长 ≥ 剩余时间 → 重启周期；否则恢复
+            if settings.resetAfterLongAway && awayDuration >= rememberedRemaining {
+                startWorkCycle(duration: settings.workDurationSeconds)
+            } else {
+                resumeFrozenPhase(rememberedPhase, remaining: rememberedRemaining, breakKind: rememberedBreakKind)
+            }
+        case .inactive, .paused, .systemAway, .none:
+            resumeFrozenPhase(rememberedPhase, remaining: rememberedRemaining, breakKind: rememberedBreakKind)
+        }
     }
 
+    // MARK: - 一次性标识消费（调用方应在同步循环中调用）
+
+    /// 消费并返回 toast 消息（消费后清空）。
     mutating func consumeToast() -> String? {
         let message = lastToastMessage
         lastToastMessage = nil
         return message
     }
 
+    /// 消费并返回 preBreak 通知标识。
     mutating func consumePreBreakNotificationFlag() -> Bool {
         let value = shouldSendPreBreakNotification
         shouldSendPreBreakNotification = false
         return value
     }
 
+    /// 清除 overlay 显示标识。
     mutating func clearOverlayFlag() {
         shouldShowOverlay = false
     }
 
+    // MARK: - Overlay 状态构建
+
+    /// 如果当前在休息阶段，构造 RestOverlayState 供 UI 层渲染全屏休息界面。
+    ///
+    /// 逻辑：
+    /// 1. 仅在 phase 为 .resting 时返回值
+    /// 2. 根据休息类型取对应时长（shortBreakSeconds / longBreakSeconds）
+    /// 3. 若调用方提供了 advice 则使用，否则使用 AdviceLibrary 随机健康建议
     func currentOverlayState(advice: String? = nil) -> RestOverlayState? {
         guard case let .resting(kind) = phase else { return nil }
         let total = kind == .short ? settings.shortBreakSeconds : settings.longBreakSeconds
@@ -203,11 +406,23 @@ struct BreakTimerEngine {
         )
     }
 
+    /// 判断下一次应使用哪种休息类型（短休息/长休息）。
+    var upcomingBreakKind: BreakKind {
+        nextBreakKind()
+    }
+
+    // MARK: - 计算属性（私有）
+
+    /// 当前是否处于休息阶段。
     private var isResting: Bool {
         if case .resting = phase { return true }
         return false
     }
 
+    // MARK: - 状态冻结检查
+
+    /// 判断指定阶段是否允许"冻结"（暂停或系统离场）。
+    /// 活跃阶段（working/preBreak/resting/postponed）可冻结，非活跃阶段不可。
     private func canFreeze(_ phase: BreakPhase) -> Bool {
         switch phase {
         case .working, .preBreak, .resting, .postponed:
@@ -217,6 +432,14 @@ struct BreakTimerEngine {
         }
     }
 
+    // MARK: - 冻结恢复
+
+    /// 根据缓存的原始阶段恢复倒计时。
+    ///
+    /// 逻辑：
+    /// 1. resting → 调用 resumeRest 继续休息
+    /// 2. preBreak/postponed → 恢复工作倒计时，如果剩余 ≤ 30 秒则重置为 preBreak
+    /// 3. working/其他 → 直接开始新工作周期
     private mutating func resumeFrozenPhase(_ frozenPhase: BreakPhase?, remaining: Int, breakKind: BreakKind?) {
         switch frozenPhase {
         case .resting:
@@ -233,6 +456,15 @@ struct BreakTimerEngine {
         }
     }
 
+    // MARK: - 倒计时更新（私有）
+
+    /// 更新工作阶段倒计时。
+    ///
+    /// 逻辑：
+    /// 1. 从 workDeadline 计算剩余秒数
+    /// 2. 剩余为 0 → 自动开始休息
+    /// 3. 剩余 ≤ 30 → 切换到 preBreak 阶段；如果启用预提醒且未发过，置位 shouldSendPreBreakNotification
+    /// 4. 剩余 > 30 → 保持在 working 阶段
     private mutating func updateWorkCountdown() {
         guard let deadline = workDeadline else {
             startWorkCycle(duration: settings.workDurationSeconds)
@@ -253,6 +485,11 @@ struct BreakTimerEngine {
         }
     }
 
+    /// 更新延后期倒计时。
+    ///
+    /// 逻辑：
+    /// 1. 从 workDeadline 计算剩余（延后期共享 workDeadline）
+    /// 2. 剩余 ≤ 30 → 切换到 preBreak 阶段（重新激活提醒），允许发送通知
     private mutating func updatePostponedCountdown() {
         guard let deadline = workDeadline else {
             startWorkCycle(duration: settings.workDurationSeconds)
@@ -268,6 +505,11 @@ struct BreakTimerEngine {
         }
     }
 
+    /// 更新休息阶段倒计时。
+    ///
+    /// 逻辑：
+    /// 1. 从 restDeadline 计算剩余秒数
+    /// 2. 剩余为 0 → 完成休息（completeRest），开始新一轮工作
     private mutating func updateRestCountdown() {
         guard let deadline = restDeadline else { return }
         remainingSeconds = max(0, Int(ceil(deadline.timeIntervalSince(now()))))
@@ -276,11 +518,20 @@ struct BreakTimerEngine {
         }
     }
 
+    /// 累计暂停时长（每次 resume 或 tick 时调用）。
     private mutating func updatePauseAccounting() {
         guard let pauseStartedAt else { return }
         totalPausedSeconds = Int(now().timeIntervalSince(pauseStartedAt))
     }
 
+    // MARK: - 阶段转换（私有）
+
+    /// 开始新的工作周期。
+    ///
+    /// 逻辑：
+    /// 1. 如果时长为 0，直接进入 preBreak；否则进入 working
+    /// 2. 设置 workDeadline 为 now + duration
+    /// 3. 清除 restDeadline、overlay、通知标志
     private mutating func startWorkCycle(duration: Int) {
         phase = duration <= 30 ? .preBreak : .working
         remainingSeconds = max(1, duration)
@@ -291,12 +542,23 @@ struct BreakTimerEngine {
         preBreakNotificationSent = duration <= 30 ? false : false
     }
 
+    /// 自动开始休息（无参版本，由 updateWorkCountdown 调用）。
+    /// 确定下次休息类型并调用完整版 startRest。
     private mutating func startRest() {
         startRest(kind: nextBreakKind(), sendMissedPreBreakNotification: settings.preBreakNotificationEnabled && !preBreakNotificationSent)
     }
 
+    /// 开始休息并将该次休息记入触发历史。
+    ///
+    /// 逻辑：
+    /// 1. 记录本次休息类型到触发历史，供长休息间隔使用
+    /// 2. 根据休息类型设置对应时长（short / long）
+    /// 3. 切换到 resting(phase) 阶段，设置 restDeadline
+    /// 4. 置位 shouldShowOverlay 触发全屏休息界面
+    /// 5. 如果之前错过了 preBreak 通知，允许补发
     private mutating func startRest(kind: BreakKind, sendMissedPreBreakNotification: Bool) {
         currentBreakKind = kind
+        recordRestTrigger(currentBreakKind)
         let duration = currentBreakKind == .short ? settings.shortBreakSeconds : settings.longBreakSeconds
         phase = .resting(currentBreakKind)
         remainingSeconds = duration
@@ -307,6 +569,7 @@ struct BreakTimerEngine {
         preBreakNotificationSent = false
     }
 
+    /// 恢复被暂停/离场中断的休息（与 startRest 类似，但不记录历史）。
     private mutating func resumeRest(kind: BreakKind, duration: Int) {
         currentBreakKind = kind
         phase = .resting(kind)
@@ -318,26 +581,65 @@ struct BreakTimerEngine {
         preBreakNotificationSent = false
     }
 
+    /// 完成一次休息，增加完成统计、重置跳过计数并开始新的工作周期。
     private mutating func completeRest() {
-        switch currentBreakKind {
-        case .short:
-            todayShortBreaks += 1
-        case .long:
-            todayLongBreaks += 1
-        }
+        recordCompletedRest(currentBreakKind)
         consecutiveSkips = 0
         shouldShowOverlay = false
         startWorkCycle(duration: settings.workDurationSeconds)
     }
 
+    // MARK: - 休息周期管理
+
+    /// 根据周期设置和休息触发历史，决定下一次的休息类型。
+    ///
+    /// 逻辑：
+    /// 1. 如果 breakCycleEnabled 关闭，始终返回 .short
+    /// 2. 如果自上次长休息触发后短休息触发数 >= longBreakFrequency，返回 .long
+    /// 3. 否则返回 .short
     private func nextBreakKind() -> BreakKind {
-        let nextShortCompletion = todayShortBreaks + 1
-        if nextShortCompletion > 0 && nextShortCompletion % settings.longBreakFrequency == 0 {
+        guard settings.breakCycleEnabled else { return .short }
+        if shortBreaksSinceLastLong >= settings.longBreakFrequency {
             return .long
         }
         return .short
     }
 
+    /// 计算自上次长休息触发以来的短休息触发次数。
+    ///
+    /// 逻辑：
+    /// 1. 如果历史为空，用减法估算（今日短休息总数 - 长休息次数 × 长休息频率）
+    /// 2. 否则从历史记录末尾向前遍历，直到遇到长休息
+    private var shortBreaksSinceLastLong: Int {
+        if restHistory.isEmpty {
+            return max(0, todayShortBreaks - todayLongBreaks * settings.longBreakFrequency)
+        }
+        let afterLastLong = restHistory.reversed().prefix { $0 != .long }
+        return afterLastLong.filter { $0 == .short }.count
+    }
+
+    /// 将一次休息触发记入历史。
+    private mutating func recordRestTrigger(_ kind: BreakKind) {
+        restHistory.append(kind)
+    }
+
+    /// 将一次完整完成的休息计入今日统计。
+    private mutating func recordCompletedRest(_ kind: BreakKind) {
+        switch kind {
+        case .short:
+            todayShortBreaks += 1
+        case .long:
+            todayLongBreaks += 1
+        }
+    }
+
+    // MARK: - 非活跃时段处理
+
+    /// 进入非活跃状态（不在活跃时间段内）。
+    ///
+    /// 逻辑：
+    /// 1. 重置所有计时状态
+    /// 2. 计算并保存下一次活跃开始时间（供 UI 展示"X 点开始"）
     private mutating func becomeInactive() {
         phase = .inactive
         remainingSeconds = 0
@@ -348,6 +650,9 @@ struct BreakTimerEngine {
         nextActiveStart = nextStart(after: now())
     }
 
+    // MARK: - 时间边界检查
+
+    /// 判断指定时间是否在活跃时间段内（活跃日期、开始/结束窗口、午休暂停全部生效）。
     private func isActiveTime(_ date: Date) -> Bool {
         guard isActiveDay(date) else { return false }
         let minute = minuteOfDay(for: date)
@@ -358,6 +663,7 @@ struct BreakTimerEngine {
         return true
     }
 
+    /// 判断指定日期是否为活跃日（工作日/自定义）。
     private func isActiveDay(_ date: Date) -> Bool {
         switch settings.activeDays {
         case .everyday:
@@ -365,14 +671,19 @@ struct BreakTimerEngine {
         case .weekdays:
             let weekday = calendar.component(.weekday, from: date)
             return weekday >= 2 && weekday <= 6
+        case .custom:
+            let weekday = calendar.component(.weekday, from: date)
+            return settings.customActiveWeekdays.contains(weekday)
         }
     }
 
+    /// 将日期转换为分钟数（从午夜开始的分钟偏移）。
     private func minuteOfDay(for date: Date) -> Int {
         let components = calendar.dateComponents([.hour, .minute], from: date)
         return (components.hour ?? 0) * 60 + (components.minute ?? 0)
     }
 
+    /// 寻找指定时间之后的下一个活跃开始时间（最多搜索未来 14 天）。
     private func nextStart(after date: Date) -> Date? {
         for offset in 0...14 {
             guard let candidateDay = calendar.date(byAdding: .day, value: offset, to: calendar.startOfDay(for: date)),
@@ -385,6 +696,9 @@ struct BreakTimerEngine {
         return nil
     }
 
+    // MARK: - Toast 文案生成
+
+    /// 根据连续跳过次数生成不同语气的提示文案。
     private func skipMessage(for count: Int) -> String {
         switch count {
         case 0...1:

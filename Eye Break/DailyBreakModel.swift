@@ -1,9 +1,31 @@
+//
+//  DailyBreakModel.swift
+//  Eye Break
+//
+//  职责：应用中唯一的 ViewModel，通过 @MainActor ObservableObject 桥接
+//  纯状态机 BreakTimerEngine 与 SwiftUI 视图层。
+//  持有引擎实例和所有服务实例，通过 1 秒 Timer 驱动 engine.tick() → syncFromEngine() 循环。
+//  依赖：BreakTimerEngine, DailyBreakStore, NotificationService, RestOverlayController,
+//        SystemActivityMonitor, LaunchAtLoginService
+//  被使用：MenuBarView, SettingsView（通过 @ObservedObject / @EnvironmentObject）
+//
+
 import Foundation
 import Combine
 import SwiftUI
 
+/// 唯一 ViewModel（@MainActor 限定）— 所有视图只与本类交互。
+///
+/// 逻辑：
+/// 1. 创建时从 store 加载配置和统计，初始化 engine
+/// 2. start() 后启动 1 秒 Timer，每秒 tick() → engine.tick() → syncFromEngine()
+/// 3. syncFromEngine() 将 engine 内部状态同步到 @Published 属性驱动视图刷新
+/// 4. 负责消费 engine 的"一次性标识"（通知/toast/overlay），调度对应服务
 @MainActor
 final class DailyBreakModel: ObservableObject {
+    // MARK: - 发布属性（驱动 SwiftUI 视图刷新）
+
+    /// 当前配置（写时自动持久化、同步 engine、更新登录自启）
     @Published var settings: BreakSettings {
         didSet {
             store.saveSettings(settings)
@@ -11,24 +33,48 @@ final class DailyBreakModel: ObservableObject {
             launchAtLogin.apply(enabled: settings.launchAtLogin)
         }
     }
+    /// 当前阶段（只读，由 syncFromEngine 更新）
     @Published private(set) var phase: BreakPhase = .inactive
+    /// 当前阶段剩余秒数
     @Published private(set) var remainingSeconds = 0
+    /// 今日短休息次数
     @Published private(set) var todayShortBreaks = 0
+    /// 今日长休息次数
     @Published private(set) var todayLongBreaks = 0
+    /// Toast 浮层消息（显示 3 秒后自动清除）
     @Published var toastMessage: String?
 
+    // MARK: - 服务实例
+
+    /// 持久化存储（UserDefaults JSON）
     private let store: DailyBreakStore
+    /// 本地通知服务（preBreak 提醒）
     private let notifications: NotificationService
+    /// 全屏休息蒙层控制器（每个屏幕一个 NSWindow）
     private let overlayController: RestOverlayController
+    /// 系统事件监听（睡眠/锁屏/会话切换）
     private let systemMonitor: SystemActivityMonitor
+    /// 登录自启管理
     private let launchAtLogin: LaunchAtLoginService
+
+    // MARK: - 内部状态
+
+    /// 核心状态机引擎（纯值类型，无 UI 依赖）
     private var engine: BreakTimerEngine
+    /// 驱动引擎的 1 秒重复定时器
     private var tickTimer: Timer?
+    /// Toast 自动关闭定时器（3 秒）
     private var toastTimer: Timer?
+    /// 缓存的最新健康建议（每次休息会话只生成一次）
     private var currentAdvice: String?
+    /// 标记 start() 是否已被调用过（防止重复启动）
     private var hasStarted = false
+    /// 标记 overlay 当前是否已显示（用于决定调用 show/update/close）
     private var isOverlayVisible = false
 
+    // MARK: - 初始化
+
+    /// 便利构造函数（使用默认服务实例）。
     convenience init() {
         self.init(
             store: DailyBreakStore(),
@@ -39,6 +85,14 @@ final class DailyBreakModel: ObservableObject {
         )
     }
 
+    /// 完整构造函数（支持依赖注入，便于测试）。
+    ///
+    /// 逻辑：
+    /// 1. 从 store 加载配置
+    /// 2. 用配置创建 engine
+    /// 3. 从 store 恢复统计
+    /// 4. 绑定服务回调
+    /// 5. 执行首次 syncFromEngine 初始化发布属性
     init(
         store: DailyBreakStore,
         notifications: NotificationService,
@@ -59,6 +113,16 @@ final class DailyBreakModel: ObservableObject {
         syncFromEngine()
     }
 
+    // MARK: - 启动
+
+    /// 启动模型（应用启动时调用一次）。
+    ///
+    /// 逻辑：
+    /// 1. 请求通知权限
+    /// 2. 应用登录自启设置
+    /// 3. 启动系统事件监听
+    /// 4. 调用 engine.startIfAllowed() 根据当前时间决定是否开始周期
+    /// 5. 创建 1 秒重复 Timer，驱动 engine.tick() + syncFromEngine()
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
@@ -76,31 +140,41 @@ final class DailyBreakModel: ObservableObject {
         tickTimer = timer
     }
 
+    // MARK: - 用户操作（均遵循 engine.操作() → syncFromEngine() 模式）
+
+    /// 暂停当前阶段（委托给 engine → 同步）。
     func pause() {
         engine.pause()
         syncFromEngine()
     }
 
+    /// 从暂停恢复（委托给 engine → 同步）。
     func resume() {
         engine.resume()
         syncFromEngine()
     }
 
+    /// 立即开始休息（委托给 engine → 同步）。
     func startBreakNow() {
         engine.startBreakNow()
         syncFromEngine()
     }
 
+    /// 跳过本次休息（委托给 engine → 同步）。
     func skipBreak() {
         engine.skipBreak()
         syncFromEngine()
     }
 
+    /// 重置工作周期（委托给 engine → 同步）。
     func resetWorkCycle() {
         engine.resetWorkCycle()
         syncFromEngine()
     }
 
+    // MARK: - 计算属性（供视图直接绑定）
+
+    /// 详细状态文案（用于菜单栏弹出窗口的详情显示）。
     var statusLine: String {
         switch phase {
         case .inactive:
@@ -123,6 +197,7 @@ final class DailyBreakModel: ObservableObject {
         }
     }
 
+    /// 极简短标题（用于菜单栏图标旁的文字）。
     var menuBarTitle: String {
         switch phase {
         case .inactive:
@@ -138,6 +213,18 @@ final class DailyBreakModel: ObservableObject {
         }
     }
 
+    /// 下一次休息类型提示（仅 breakCycleEnabled 时显示）。
+    var nextBreakLine: String? {
+        guard settings.breakCycleEnabled else { return nil }
+        switch engine.upcomingBreakKind {
+        case .short:
+            return "下一次：短休息"
+        case .long:
+            return "下一次：长休息"
+        }
+    }
+
+    /// 是否允许重置工作周期（仅在工作或预提醒阶段可重置）。
     var canResetWorkCycle: Bool {
         switch phase {
         case .working, .preBreak, .postponed:
@@ -147,6 +234,14 @@ final class DailyBreakModel: ObservableObject {
         }
     }
 
+    // MARK: - 服务回调绑定
+
+    /// 绑定 overlay 和系统事件监听的回调。
+    ///
+    /// 逻辑：
+    /// 1. overlayController.onSkip → 用户在休息蒙层上点击跳过
+    /// 2. systemMonitor.onAway → 锁屏/睡眠/会话切换（调用 engine.systemWillSleepOrLock）
+    /// 3. systemMonitor.onReturn → 唤醒/解锁/会话恢复（调用 engine.systemDidWakeOrUnlock）
     private func bindServices() {
         overlayController.onSkip = { [weak self] in
             Task { @MainActor in self?.skipBreak() }
@@ -165,11 +260,28 @@ final class DailyBreakModel: ObservableObject {
         }
     }
 
+    // MARK: - 核心循环
+
+    /// 每秒调用一次：驱动 engine 状态机，然后同步结果到发布属性。
     private func tick() {
         engine.tick()
         syncFromEngine()
     }
 
+    // MARK: - 状态同步（核心方法）
+
+    /// 将 engine 内部状态同步到 @Published 属性 + 调度副作用服务。
+    ///
+    /// 逻辑：
+    /// 1. 复制 engine 的 phase、剩余秒数、休息计数到 @Published 属性触发 UI 刷新
+    /// 2. 保存最新统计到 store
+    /// 3. 消费 engine 的 preBreak 通知标识 → 如果有，发送本地通知
+    /// 4. 消费 engine 的 toast 消息 → 如果有，显示 3 秒 toast
+    /// 5. 处理 overlay 生命周期：
+    ///    a. 若 phase 是 resting 且 engine 说应显示 → 调用 overlayController.show() 创建/展示蒙层
+    ///    b. 若 phase 是 resting 但蒙层已显示 → 调用 overlayController.update() 更新倒计时
+    ///    c. 若 phase 不是 resting → 调用 overlayController.close() 关闭蒙层
+    /// 6. 缓存 isOverlayVisible 和 currentAdvice 供下一轮使用
     private func syncFromEngine() {
         phase = engine.phase
         remainingSeconds = engine.remainingSeconds
@@ -177,23 +289,29 @@ final class DailyBreakModel: ObservableObject {
         todayLongBreaks = engine.todayLongBreaks
         store.saveStats(engine.stats)
 
+        // 消费 preBreak 通知标识：engine 在倒计时 ≤ 30 秒时置位此标识
         if engine.consumePreBreakNotificationFlag() {
             notifications.sendPreBreakNotification(playSound: settings.playSound)
         }
 
+        // 消费 toast 消息（跳过/延后时生成）
         if let message = engine.consumeToast() {
             showToast(message)
         }
 
+        // 处理全屏蒙层生命周期
         if let overlayState = makeOverlayState() {
             if engine.shouldShowOverlay {
+                // 首次进入休息 → 创建并展示蒙层
                 overlayController.show(state: overlayState)
                 engine.clearOverlayFlag()
             } else {
+                // 蒙层已存在 → 仅更新倒计时和文案
                 overlayController.update(state: overlayState)
             }
             isOverlayVisible = true
         } else {
+            // 不在休息阶段 → 如果蒙层还开着，关闭它
             if isOverlayVisible {
                 overlayController.close()
                 isOverlayVisible = false
@@ -202,6 +320,13 @@ final class DailyBreakModel: ObservableObject {
         }
     }
 
+    // MARK: - Overlay 状态构造
+
+    /// 构造 RestOverlayState（仅在 resting 阶段返回值）。
+    ///
+    /// 逻辑：
+    /// 1. 每次休息会话只在首次调用时生成 healthTip（currentAdvice 为空时）
+    /// 2. 后续调用复用缓存的 advice，确保整个休息过程显示同一条建议
     private func makeOverlayState() -> RestOverlayState? {
         guard case let .resting(kind) = engine.phase else { return nil }
         if currentAdvice == nil {
@@ -210,6 +335,14 @@ final class DailyBreakModel: ObservableObject {
         return engine.currentOverlayState(advice: currentAdvice)
     }
 
+    // MARK: - Toast 显示
+
+    /// 显示 toast 消息，3 秒后自动消失。
+    ///
+    /// 逻辑：
+    /// 1. 设置 toastMessage（触发 UI 显示）
+    /// 2. 取消之前的 auto-dismiss 定时器
+    /// 3. 创建新的 3 秒定时器，到期后清空 toastMessage
     private func showToast(_ message: String) {
         toastMessage = message
         toastTimer?.invalidate()
