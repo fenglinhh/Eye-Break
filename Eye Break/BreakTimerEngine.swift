@@ -105,12 +105,11 @@ struct BreakTimerEngine {
     ///
     /// 逻辑：
     /// 1. 保存新配置到 self.settings
-    /// 2. 如果当前在 working/preBreak 阶段，将剩余时间限制为不超过新的工作时长
+    /// 2. 如果当前或冻结前处于工作类阶段，将剩余时间限制为不超过新的工作时长
+    /// 3. 如果当前或冻结前处于休息阶段，将剩余时间限制为不超过对应的新休息时长
     mutating func updateSettings(_ settings: BreakSettings) {
         self.settings = settings
-        if phase == .working || phase == .preBreak {
-            remainingSeconds = min(remainingSeconds, settings.workDurationSeconds)
-        }
+        clampCurrentAndFrozenRemainingToSettings()
     }
 
     // MARK: - 持久化恢复
@@ -169,12 +168,12 @@ struct BreakTimerEngine {
     ///   - systemAway → 不做任何事（时间冻结）
     ///   - inactive → 自动开始新周期
     mutating func tick() {
+        shouldSendPreBreakNotification = false
+
         guard isActiveTime(now()) else {
-            becomeInactive()
+            tickOutsideActiveTime()
             return
         }
-
-        shouldSendPreBreakNotification = false
 
         switch phase {
         case .inactive:
@@ -337,11 +336,6 @@ struct BreakTimerEngine {
         awayBreakKind = nil
         awayStartedAt = nil
 
-        guard isActiveTime(now()) else {
-            becomeInactive()
-            return
-        }
-
         switch rememberedPhase {
         case .resting:
             // 休息阶段：扣除离场时间后继续剩余休息；如果离场已经够久，直接完成休息
@@ -353,6 +347,10 @@ struct BreakTimerEngine {
                 resumeRest(kind: currentBreakKind, duration: remainingAfterAway)
             }
         case .working, .preBreak, .postponed:
+            guard isActiveTime(now()) else {
+                becomeInactive()
+                return
+            }
             // 工作阶段：如果设置了长时间离场重置且离场时长 ≥ 剩余时间 → 重启周期；否则恢复
             if settings.resetAfterLongAway && awayDuration >= rememberedRemaining {
                 startWorkCycle(duration: settings.workDurationSeconds)
@@ -360,6 +358,10 @@ struct BreakTimerEngine {
                 resumeFrozenPhase(rememberedPhase, remaining: rememberedRemaining, breakKind: rememberedBreakKind)
             }
         case .inactive, .paused, .systemAway, .none:
+            guard isActiveTime(now()) else {
+                becomeInactive()
+                return
+            }
             resumeFrozenPhase(rememberedPhase, remaining: rememberedRemaining, breakKind: rememberedBreakKind)
         }
     }
@@ -441,18 +443,19 @@ struct BreakTimerEngine {
     /// 2. preBreak/postponed → 恢复工作倒计时，如果剩余 ≤ 30 秒则重置为 preBreak
     /// 3. working/其他 → 直接开始新工作周期
     private mutating func resumeFrozenPhase(_ frozenPhase: BreakPhase?, remaining: Int, breakKind: BreakKind?) {
+        let safeRemaining = clampedRemaining(remaining, for: frozenPhase, breakKind: breakKind)
         switch frozenPhase {
         case .resting:
-            resumeRest(kind: breakKind ?? currentBreakKind, duration: remaining)
+            resumeRest(kind: breakKind ?? currentBreakKind, duration: safeRemaining)
         case .preBreak, .postponed:
-            startWorkCycle(duration: remaining)
-            if remaining <= 30 {
+            startWorkCycle(duration: safeRemaining)
+            if safeRemaining <= 30 {
                 phase = .preBreak
             }
         case .working:
-            startWorkCycle(duration: remaining)
+            startWorkCycle(duration: safeRemaining)
         case .inactive, .paused, .systemAway, .none:
-            startWorkCycle(duration: remaining)
+            startWorkCycle(duration: safeRemaining)
         }
     }
 
@@ -539,7 +542,7 @@ struct BreakTimerEngine {
         restDeadline = nil
         shouldShowOverlay = false
         shouldSendPreBreakNotification = false
-        preBreakNotificationSent = duration <= 30 ? false : false
+        preBreakNotificationSent = false
     }
 
     /// 自动开始休息（无参版本，由 updateWorkCountdown 调用）。
@@ -586,7 +589,73 @@ struct BreakTimerEngine {
         recordCompletedRest(currentBreakKind)
         consecutiveSkips = 0
         shouldShowOverlay = false
-        startWorkCycle(duration: settings.workDurationSeconds)
+        if isActiveTime(now()) {
+            startWorkCycle(duration: settings.workDurationSeconds)
+        } else {
+            becomeInactive()
+        }
+    }
+
+    /// 根据新设置裁剪当前和冻结缓存中的剩余时间。
+    ///
+    /// 逻辑：
+    /// 1. 当前正在运行的工作/休息倒计时需要同步裁剪，并刷新 deadline
+    /// 2. 暂停和系统离场保存的 remaining 也要裁剪，否则恢复后会超过新设置
+    /// 3. 不主动延长倒计时，只限制到新的最大时长
+    private mutating func clampCurrentAndFrozenRemainingToSettings() {
+        switch phase {
+        case .working, .preBreak, .postponed:
+            remainingSeconds = clampedRemaining(remainingSeconds, for: phase, breakKind: nil)
+            workDeadline = now().addingTimeInterval(TimeInterval(remainingSeconds))
+        case .resting(let kind):
+            remainingSeconds = clampedRemaining(remainingSeconds, for: phase, breakKind: kind)
+            restDeadline = now().addingTimeInterval(TimeInterval(remainingSeconds))
+        case .paused:
+            if let pausedRemainingSeconds {
+                let clamped = clampedRemaining(pausedRemainingSeconds, for: pausedPhase, breakKind: pausedBreakKind)
+                self.pausedRemainingSeconds = clamped
+                remainingSeconds = clamped
+            }
+        case .systemAway:
+            if let awayRemainingSeconds {
+                let clamped = clampedRemaining(awayRemainingSeconds, for: awayPhase, breakKind: awayBreakKind)
+                self.awayRemainingSeconds = clamped
+                remainingSeconds = clamped
+            }
+        case .inactive:
+            break
+        }
+    }
+
+    /// 根据阶段返回不超过当前设置上限的剩余秒数。
+    private func clampedRemaining(_ remaining: Int, for phase: BreakPhase?, breakKind: BreakKind?) -> Int {
+        let upperBound: Int
+        switch phase {
+        case .resting(let kind):
+            upperBound = kind == .short ? settings.shortBreakSeconds : settings.longBreakSeconds
+        default:
+            upperBound = settings.workDurationSeconds
+        }
+        return max(1, min(remaining, upperBound))
+    }
+
+    /// 非活跃时间段内的 tick 分发。
+    ///
+    /// 逻辑：
+    /// 1. 用户手动触发的休息应继续倒计时，不被工作可用时间窗口打断
+    /// 2. 暂停状态继续累计暂停时长
+    /// 3. 其他自动工作状态回到 inactive，等待下一次活跃时间
+    private mutating func tickOutsideActiveTime() {
+        switch phase {
+        case .resting:
+            updateRestCountdown()
+        case .paused:
+            updatePauseAccounting()
+        case .systemAway:
+            break
+        default:
+            becomeInactive()
+        }
     }
 
     // MARK: - 休息周期管理
@@ -653,14 +722,42 @@ struct BreakTimerEngine {
     // MARK: - 时间边界检查
 
     /// 判断指定时间是否在活跃时间段内（活跃日期、开始/结束窗口、午休暂停全部生效）。
+    ///
+    /// 逻辑：
+    /// 1. 普通当天窗口按 start <= minute < end 判断
+    /// 2. 跨天窗口按 start...24:00 或 00:00..<end 判断，凌晨段归属前一天的活跃日期
+    /// 3. 开始和结束相同视为无效窗口，避免误当作全天
     private func isActiveTime(_ date: Date) -> Bool {
-        guard isActiveDay(date) else { return false }
+        guard settings.activeStartMinute != settings.activeEndMinute else { return false }
         let minute = minuteOfDay(for: date)
-        guard minute >= settings.activeStartMinute && minute < settings.activeEndMinute else { return false }
+        guard isInsideActiveWindow(minute: minute, date: date) else { return false }
         if settings.lunchPauseEnabled && minute >= settings.lunchStartMinute && minute < settings.lunchEndMinute {
             return false
         }
         return true
+    }
+
+    /// 判断分钟是否落入工作可用窗口，并处理跨天窗口的日期归属。
+    ///
+    /// 逻辑：
+    /// 1. 非跨天：当前日期必须是活跃日
+    /// 2. 跨天晚间段：当前日期是活跃日
+    /// 3. 跨天凌晨段：前一天是活跃日，因为这段时间来自前一天开始的工作窗口
+    private func isInsideActiveWindow(minute: Int, date: Date) -> Bool {
+        if settings.activeEndMinute > settings.activeStartMinute {
+            return isActiveDay(date) && minute >= settings.activeStartMinute && minute < settings.activeEndMinute
+        }
+
+        if minute >= settings.activeStartMinute {
+            return isActiveDay(date)
+        }
+
+        if minute < settings.activeEndMinute {
+            guard let previousDay = calendar.date(byAdding: .day, value: -1, to: date) else { return false }
+            return isActiveDay(previousDay)
+        }
+
+        return false
     }
 
     /// 判断指定日期是否为活跃日（工作日/自定义）。
@@ -684,7 +781,10 @@ struct BreakTimerEngine {
     }
 
     /// 寻找指定时间之后的下一个活跃开始时间（最多搜索未来 14 天）。
+    ///
+    /// 逻辑：下一个开始时间始终是某个活跃日的 activeStartMinute；跨天窗口的凌晨段不额外生成开始点。
     private func nextStart(after date: Date) -> Date? {
+        guard settings.activeStartMinute != settings.activeEndMinute else { return nil }
         for offset in 0...14 {
             guard let candidateDay = calendar.date(byAdding: .day, value: offset, to: calendar.startOfDay(for: date)),
                   isActiveDay(candidateDay) else { continue }

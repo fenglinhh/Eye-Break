@@ -161,6 +161,30 @@ final class BreakTimerEngineTests: XCTestCase {
         XCTAssertEqual(engine.totalPausedSeconds, 0)
     }
 
+    /// 暂停状态下修改工作时长后，恢复时剩余时间不能超过新的工作时长。
+    ///
+    /// 逻辑：
+    /// 1. 工作 5min 后暂停，剩余 15min
+    /// 2. 设置页把工作时长改为 10min，并调用 updateSettings
+    /// 3. 恢复后应按新设置裁剪到 10min，而不是继续旧的 15min
+    func testUpdateSettingsWhilePausedClampsWorkRemainingBeforeResume() {
+        var clock = TestClock(now: mondayMorning)
+        var engine = BreakTimerEngine(settings: .testDefaults, now: { clock.now })
+
+        engine.startIfAllowed()
+        clock.advance(by: 5 * 60)
+        engine.tick()
+        engine.pause()
+
+        var settings = BreakSettings.testDefaults
+        settings.workDurationSeconds = 10 * 60
+        engine.updateSettings(settings)
+        engine.resume()
+
+        XCTAssertEqual(engine.phase, .working)
+        XCTAssertEqual(engine.remainingSeconds, 10 * 60)
+    }
+
     /// 休息阶段暂停后恢复，倒计时保持不变
     ///
     /// 逻辑：
@@ -208,6 +232,39 @@ final class BreakTimerEngineTests: XCTestCase {
         XCTAssertEqual(engine.remainingSeconds, 20)
         XCTAssertTrue(engine.shouldShowOverlay)
         XCTAssertFalse(engine.shouldSendPreBreakNotification)
+    }
+
+    /// 非工作可用时间内，用户手动点击「现在休息一下」仍应完整执行休息。
+    ///
+    /// 逻辑：
+    /// 1. 当前时间为 16:11，工作可用结束时间为 16:00，引擎处于 inactive
+    /// 2. 用户手动 startBreakNow 后进入短休息
+    /// 3. 后续 tick 不应立刻回到 inactive；休息完成后再回到 inactive
+    func testStartBreakNowOutsideActiveWindowContinuesRestUntilFinished() {
+        var settings = BreakSettings.testDefaults
+        settings.activeStartMinute = 9 * 60
+        settings.activeEndMinute = 16 * 60
+        settings.lunchPauseEnabled = false
+        let afterWork = mondayMorning.addingTimeInterval(7 * 60 * 60 + 11 * 60)
+        var clock = TestClock(now: afterWork)
+        var engine = BreakTimerEngine(settings: settings, now: { clock.now })
+
+        engine.startIfAllowed()
+        XCTAssertEqual(engine.phase, .inactive)
+
+        engine.startBreakNow()
+        XCTAssertEqual(engine.phase, .resting(.short))
+        XCTAssertEqual(engine.remainingSeconds, 20)
+
+        clock.advance(by: 1)
+        engine.tick()
+        XCTAssertEqual(engine.phase, .resting(.short))
+        XCTAssertEqual(engine.remainingSeconds, 19)
+
+        clock.advance(by: 19)
+        engine.tick()
+        XCTAssertEqual(engine.phase, .inactive)
+        XCTAssertEqual(engine.todayShortBreaks, 1)
     }
 
     // MARK: - 跳过休息
@@ -439,6 +496,75 @@ final class BreakTimerEngineTests: XCTestCase {
         clock.now = mondayMorning.addingTimeInterval(3 * 60 * 60 + 30 * 60)
         engine.startIfAllowed()
         XCTAssertEqual(engine.phase, .inactive)
+    }
+
+    /// 跨天工作窗口需要把凌晨段归属到前一天的活跃日期。
+    ///
+    /// 逻辑：
+    /// 1. 只勾选周一，工作窗口为周一 22:00 到次日 06:00
+    /// 2. 周二 01:00 仍属于周一开始的窗口，应允许工作
+    /// 3. 周二 23:00 属于周二开始的窗口，未勾选周二，应 inactive
+    func testCrossDayActiveWindowUsesPreviousDayForAfterMidnightSegment() {
+        var settings = BreakSettings.testDefaults
+        settings.activeDays = .custom
+        settings.customActiveWeekdays = [2]
+        settings.activeStartMinute = 22 * 60
+        settings.activeEndMinute = 6 * 60
+        settings.lunchPauseEnabled = false
+
+        let mondayNightClock = TestClock(now: mondayMorning.addingTimeInterval(14 * 60 * 60))
+        var mondayNightEngine = BreakTimerEngine(settings: settings, now: { mondayNightClock.now })
+        mondayNightEngine.startIfAllowed()
+        XCTAssertEqual(mondayNightEngine.phase, .working)
+
+        let tuesdayEarlyClock = TestClock(now: mondayMorning.addingTimeInterval(16 * 60 * 60))
+        var tuesdayEarlyEngine = BreakTimerEngine(settings: settings, now: { tuesdayEarlyClock.now })
+        tuesdayEarlyEngine.startIfAllowed()
+        XCTAssertEqual(tuesdayEarlyEngine.phase, .working)
+
+        let tuesdayNightClock = TestClock(now: mondayMorning.addingTimeInterval(38 * 60 * 60))
+        var tuesdayNightEngine = BreakTimerEngine(settings: settings, now: { tuesdayNightClock.now })
+        tuesdayNightEngine.startIfAllowed()
+        XCTAssertEqual(tuesdayNightEngine.phase, .inactive)
+    }
+
+    /// 跨天窗口在当天未开始前仍应报告当天晚上的开始时间。
+    ///
+    /// 逻辑：
+    /// 1. 当前为周一中午，工作窗口为 22:00-次日 06:00
+    /// 2. 引擎 inactive，并把 nextActiveStart 指向周一 22:00
+    func testCrossDayActiveWindowReportsSameDayStartWhenBeforeStart() {
+        var settings = BreakSettings.testDefaults
+        settings.activeDays = .custom
+        settings.customActiveWeekdays = [2]
+        settings.activeStartMinute = 22 * 60
+        settings.activeEndMinute = 6 * 60
+        settings.lunchPauseEnabled = false
+
+        let mondayNoon = mondayMorning.addingTimeInterval(3 * 60 * 60)
+        let mondayTenPM = mondayMorning.addingTimeInterval(13 * 60 * 60)
+        let clock = TestClock(now: mondayNoon)
+        var engine = BreakTimerEngine(settings: settings, now: { clock.now })
+
+        engine.startIfAllowed()
+
+        XCTAssertEqual(engine.phase, .inactive)
+        XCTAssertEqual(engine.nextActiveStart, mondayTenPM)
+    }
+
+    /// 旧版统计 JSON 缺少新增字段时应容错解码。
+    ///
+    /// 逻辑：只提供 dayKey，其他统计字段使用默认值，避免版本升级后整份统计读取失败。
+    func testBreakStatsDecoderToleratesMissingFields() throws {
+        let data = #"{"dayKey":"2026-6-22"}"#.data(using: .utf8)!
+
+        let stats = try JSONDecoder().decode(BreakStats.self, from: data)
+
+        XCTAssertEqual(stats.dayKey, "2026-6-22")
+        XCTAssertEqual(stats.shortBreaks, 0)
+        XCTAssertEqual(stats.longBreaks, 0)
+        XCTAssertEqual(stats.consecutiveSkips, 0)
+        XCTAssertEqual(stats.restHistory, [])
     }
 }
 
