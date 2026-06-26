@@ -262,10 +262,11 @@ struct BreakStats: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        dayKey = try container.decode(String.self, forKey: .dayKey)
-        shortBreaks = try container.decode(Int.self, forKey: .shortBreaks)
-        longBreaks = try container.decode(Int.self, forKey: .longBreaks)
-        consecutiveSkips = try container.decode(Int.self, forKey: .consecutiveSkips)
+        let today = Self.today()
+        dayKey = try container.decodeIfPresent(String.self, forKey: .dayKey) ?? today.dayKey
+        shortBreaks = try container.decodeIfPresent(Int.self, forKey: .shortBreaks) ?? today.shortBreaks
+        longBreaks = try container.decodeIfPresent(Int.self, forKey: .longBreaks) ?? today.longBreaks
+        consecutiveSkips = try container.decodeIfPresent(Int.self, forKey: .consecutiveSkips) ?? today.consecutiveSkips
         restHistory = try container.decodeIfPresent([BreakKind].self, forKey: .restHistory) ?? []
     }
 }

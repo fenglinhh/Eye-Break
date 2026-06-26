@@ -115,7 +115,7 @@ struct MenuBarView: View {
                     performAndClose(model.resume)
                 }
             } else {
-                MenuActionRow(title: "暂停", systemImage: "pause.fill", tint: .dailyBlue) {
+                MenuActionRow(title: "暂停", systemImage: "pause.fill", tint: .dailyBlue, isEnabled: model.canPause) {
                     performAndClose(model.pause)
                 }
             }
@@ -276,12 +276,12 @@ struct MenuBarView: View {
         return min(1, max(0, Double(elapsed) / Double(total)))
     }
 
-    /// 先关闭菜单面板窗口，再异步执行操作
+    /// 先关闭菜单面板窗口，再延迟执行操作。
     ///
-    /// 原因：菜单面板关闭后才能呈现模态弹窗（如设置窗口、系统弹窗）
+    /// 原因：MenuBarExtra 的 dismiss 有关闭动画，立即显示休息蒙层会和菜单窗口消失过程打架。
     private func performAndClose(_ action: @escaping () -> Void) {
         closeMenuWindow()
-        DispatchQueue.main.async {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
             action()
         }
     }

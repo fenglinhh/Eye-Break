@@ -113,6 +113,12 @@ final class DailyBreakModel: ObservableObject {
         syncFromEngine()
     }
 
+    /// 释放模型时清理 RunLoop Timer，避免测试或未来多实例场景中空转。
+    deinit {
+        tickTimer?.invalidate()
+        toastTimer?.invalidate()
+    }
+
     // MARK: - 启动
 
     /// 启动模型（应用启动时调用一次）。
@@ -230,6 +236,16 @@ final class DailyBreakModel: ObservableObject {
         case .working, .preBreak, .postponed:
             return true
         case .inactive, .resting, .paused, .systemAway:
+            return false
+        }
+    }
+
+    /// 是否允许手动暂停当前状态。
+    var canPause: Bool {
+        switch phase {
+        case .working, .preBreak, .resting, .postponed:
+            return true
+        case .inactive, .paused, .systemAway:
             return false
         }
     }

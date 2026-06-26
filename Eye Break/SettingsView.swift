@@ -8,6 +8,9 @@
 //
 
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// 设置面板视图
 ///
@@ -78,13 +81,16 @@ struct SettingsView: View {
         .frame(width: SettingsLayout.windowWidth, height: SettingsLayout.windowHeight)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .onTapGesture {
-            focusedField = nil
+            endEditing()
         }
         // 进入设置时保存当前设置作为 baseline，并初始化本地草稿
         .onAppear {
             let settings = normalizedSettingsForSettingsPage(model.settings)
             baselineSettings = settings
             draftSettings = settings
+            DispatchQueue.main.async {
+                endEditing()
+            }
         }
         // 外部设置变化且本页没有未保存修改时，同步刷新草稿
         .onChange(of: model.settings) { _, newSettings in
@@ -144,8 +150,7 @@ struct SettingsView: View {
     private var scheduleSection: some View {
         SettingsSectionCard(title: "时间安排", systemImage: "calendar", tint: SettingsPalette.blue) {
             SettingsRow(title: "工作时长") {
-                durationField(text: workDurationMinutesBinding, unit: "分钟")
-                    .focused($focusedField, equals: .workDuration)
+                durationField(text: workDurationMinutesBinding, unit: "分钟", field: .workDuration)
             }
 
             SettingsDivider()
@@ -171,7 +176,7 @@ struct SettingsView: View {
 
             SettingsRow(
                 title: "工作可用",
-                subtitle: activeWindowBinding.wrappedValue ? "当前仅在 \(timeLabel(settingsForDisplay.activeStartMinute)) - \(timeLabel(settingsForDisplay.activeEndMinute)) 生效" : "全天可用"
+                subtitle: activeWindowBinding.wrappedValue ? activeWindowSubtitle(for: settingsForDisplay) : "全天可用"
             ) {
                 settingsToggle(activeWindowBinding)
             }
@@ -239,15 +244,13 @@ struct SettingsView: View {
                 SettingsDivider()
 
                 SettingsRow(title: "间隔") {
-                    durationField(text: longBreakFrequencyBinding, unit: "次")
-                        .focused($focusedField, equals: .longBreakFrequency)
+                    durationField(text: longBreakFrequencyBinding, unit: "次", field: .longBreakFrequency)
                 }
 
                 SettingsDivider()
 
                 SettingsRow(title: "长休息时长") {
-                    durationField(text: longBreakMinutesBinding, unit: "分钟")
-                        .focused($focusedField, equals: .longBreakDuration)
+                    durationField(text: longBreakMinutesBinding, unit: "分钟", field: .longBreakDuration)
                 }
             }
         }
@@ -276,6 +279,7 @@ struct SettingsView: View {
     private var saveBar: some View {
         HStack(spacing: 12) {
             Button("撤销") {
+                endEditing()
                 undoChanges()
             }
             .buttonStyle(SettingsSecondaryButtonStyle())
@@ -283,7 +287,10 @@ struct SettingsView: View {
             Spacer()
 
             Button("保存") {
-                saveChanges()
+                endEditing()
+                DispatchQueue.main.async {
+                    saveChanges()
+                }
             }
             .buttonStyle(SettingsSaveButtonStyle())
         }
@@ -313,21 +320,33 @@ struct SettingsView: View {
     /// 逻辑：
     /// 1. TextField 只展示数值，由外部 Binding 负责过滤和换算
     /// 2. 单位作为右侧胶囊提示，保持行内控件紧凑
-    private func durationField(text: Binding<String>, unit: String) -> some View {
-        HStack(spacing: 8) {
+    private func durationField(text: Binding<String>, unit: String, field: Field) -> some View {
+        let isFocused = focusedField == field
+
+        return HStack(spacing: 8) {
             TextField("", text: text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13, weight: .semibold))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(SettingsPalette.primaryText)
+                .focused($focusedField, equals: field)
                 .frame(width: SettingsLayout.numericTextWidth)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
                 .background(.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(SettingsPalette.separator.opacity(0.8), lineWidth: 1)
+                        .stroke(
+                            isFocused ? SettingsPalette.teal.opacity(0.95) : SettingsPalette.separator.opacity(0.8),
+                            lineWidth: isFocused ? 1.4 : 1
+                        )
                 }
+                .shadow(
+                    color: isFocused ? SettingsPalette.teal.opacity(0.18) : .clear,
+                    radius: isFocused ? 6 : 0,
+                    x: 0,
+                    y: 0
+                )
 
             Text(unit)
                 .font(.system(size: 11, weight: .medium))
@@ -342,12 +361,33 @@ struct SettingsView: View {
     /// 创建 24 小时制行内时间控件。
     ///
     /// 逻辑：
-    /// 1. 展示 HH:mm 文本输入，不弹出额外窗口
-    /// 2. 右侧上下按钮按 15 分钟步进
-    /// 3. 失焦或回车时解析输入并写回 minuteOfDay
+    /// 1. 展示 HH:mm，不显示 AM/PM 或上午下午
+    /// 2. 非法输入回滚到上一次合法值，并显示 toast
+    /// 3. 控件整体进入统一右侧控制列，保持行尾视觉对齐
     private func timeInlineControl(_ minuteBinding: Binding<Int>) -> some View {
-        TimeInlineControl(minuteOfDay: minuteBinding)
+        TimeInlineControl(minuteOfDay: minuteBinding) {
+            toastMessage = "请输入 4 位 24 小时制时间，如 0900 或 1830。"
+            dismissToastAfterDelay()
+        }
             .frame(width: SettingsLayout.timeInlineWidth)
+    }
+
+    /// 生成工作可用时间窗口说明文案。
+    ///
+    /// 逻辑：
+    /// 1. 结束时间大于开始时间：显示当天时间段
+    /// 2. 结束时间小于开始时间：显示跨天时间段
+    /// 3. 两者相等：提示不能保存，避免用户误解为全天
+    private func activeWindowSubtitle(for settings: BreakSettings) -> String {
+        let start = timeLabel(settings.activeStartMinute)
+        let end = timeLabel(settings.activeEndMinute)
+        if settings.activeStartMinute == settings.activeEndMinute {
+            return "24 小时制，开始和结束时间不能相同"
+        }
+        if settings.activeEndMinute < settings.activeStartMinute {
+            return "24 小时制，当前仅在 \(start) - 次日 \(end) 生效"
+        }
+        return "24 小时制，当前仅在 \(start) - \(end) 生效"
     }
 
     /// 创建标准开关控件，统一系统 Toggle 在右侧槽位里的可见边界。
@@ -361,6 +401,15 @@ struct SettingsView: View {
     }
 
     // MARK: - 操作
+
+    /// 结束所有输入框编辑，用于点击空白处、保存前、撤销前统一失焦。
+    private func endEditing() {
+        focusedField = nil
+
+        #if os(macOS)
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        #endif
+    }
 
     /// 撤销所有未保存的修改，恢复本地草稿到 baseline 快照
     ///
@@ -382,9 +431,19 @@ struct SettingsView: View {
     /// 2. 用保存后的值覆盖 baselineSettings，hasChanges 变为 false
     private func saveChanges() {
         guard let draft = draftSettings else { return }
+        if isActiveWindowEnabled(draft), draft.activeStartMinute == draft.activeEndMinute {
+            toastMessage = "开始和结束时间不能相同"
+            dismissToastAfterDelay()
+            return
+        }
         model.settings = draft
         baselineSettings = draft
         draftSettings = draft
+    }
+
+    /// 判断工作可用时间窗口是否处于开启状态。
+    private func isActiveWindowEnabled(_ settings: BreakSettings) -> Bool {
+        !(settings.activeStartMinute == 0 && settings.activeEndMinute == 24 * 60)
     }
 
     /// 延迟 2.5 秒后清除 toast 消息
@@ -688,17 +747,26 @@ private struct SettingsSegmentedControl<Value: Hashable>: View {
                 Button {
                     selection = option.value
                 } label: {
-                    Text(option.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(selection == option.value ? .white : SettingsPalette.primaryText.opacity(0.74))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: SettingsLayout.segmentedHeight)
-                        .background {
-                            if selection == option.value {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(SettingsPalette.teal)
-                            }
+                    ZStack {
+                        if selection == option.value {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(SettingsPalette.teal)
+                        } else {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.clear)
                         }
+
+                        Text(option.title)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(
+                                selection == option.value
+                                ? .white
+                                : SettingsPalette.primaryText.opacity(0.74)
+                            )
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: SettingsLayout.segmentedHeight)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -709,6 +777,7 @@ private struct SettingsSegmentedControl<Value: Hashable>: View {
         .overlay {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(SettingsPalette.separator.opacity(0.65), lineWidth: 1)
+                .allowsHitTesting(false)
         }
     }
 }
@@ -803,33 +872,37 @@ private struct SettingsSecondaryButtonStyle: ButtonStyle {
     }
 }
 
-/// 行内时间控件：展示 HH:mm 文本框和上下步进按钮，不弹出额外窗口。
+/// 行内时间控件：4 位数字输入 mask，自动展示为 24 小时制 HH:mm。
 ///
 /// 逻辑：
-/// 1. TextField 直接在当前行编辑 24 小时制时间
-/// 2. 输入支持 HH:mm 或 HHmm，失焦/回车后提交
-/// 3. 上下按钮按 15 分钟循环步进
+/// 1. 用户只输入数字，控件自动将 0900 展示为 09:00
+/// 2. 输入提交或失焦时解析，非法输入回滚到上一次合法值并回调提示
+/// 3. 展示层使用 24 小时制，存储层仍然是 0...1439 的 minuteOfDay
 private struct TimeInlineControl: View {
     @Binding var minuteOfDay: Int
+    var onInvalidInput: () -> Void
+
     @State private var text: String = ""
+    @State private var lastValidMinute: Int = 0
     @FocusState private var isFocused: Bool
 
     var body: some View {
         HStack(spacing: 4) {
             TextField("", text: timeTextBinding)
-                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundStyle(SettingsPalette.primaryText)
                 .multilineTextAlignment(.center)
                 .textFieldStyle(.plain)
                 .focused($isFocused)
-                .frame(width: 54)
+                .frame(width: SettingsLayout.timeTextWidth, height: 24)
                 .onSubmit {
                     commitText()
+                    isFocused = false
                 }
 
             VStack(spacing: 0) {
                 Button {
-                    step(minutes: 15)
+                    step(minutes: 1)
                 } label: {
                     Image(systemName: "chevron.up")
                         .font(.system(size: 8, weight: .bold))
@@ -838,7 +911,7 @@ private struct TimeInlineControl: View {
                 .frame(width: 16, height: 12)
 
                 Button {
-                    step(minutes: -15)
+                    step(minutes: -1)
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .bold))
@@ -854,83 +927,128 @@ private struct TimeInlineControl: View {
         .background(.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(SettingsPalette.separator.opacity(0.8), lineWidth: 1)
+                .stroke(
+                    isFocused ? SettingsPalette.teal.opacity(0.95) : SettingsPalette.separator.opacity(0.8),
+                    lineWidth: isFocused ? 1.4 : 1
+                )
         }
+        .shadow(
+            color: isFocused ? SettingsPalette.teal.opacity(0.18) : .clear,
+            radius: isFocused ? 6 : 0,
+            x: 0,
+            y: 0
+        )
         .onAppear {
-            text = formatted(minuteOfDay)
+            lastValidMinute = clampedMinute(minuteOfDay)
+            text = formatted(lastValidMinute)
         }
         .onChange(of: minuteOfDay) { _, newValue in
+            let clamped = clampedMinute(newValue)
+            lastValidMinute = clamped
             guard !isFocused else { return }
-            text = formatted(newValue)
+            text = formatted(clamped)
         }
         .onChange(of: isFocused) { _, focused in
             if focused {
-                text = formatted(minuteOfDay)
-            } else {
+                lastValidMinute = clampedMinute(minuteOfDay)
+                text = formatted(lastValidMinute)
+            } else if text != formatted(clampedMinute(minuteOfDay)) {
                 commitText()
             }
         }
     }
 
-    /// 文本框绑定：只允许数字和冒号，避免输入其它字符。
+    /// 时间文本绑定：只接受数字输入，冒号由控件自动补齐。
     private var timeTextBinding: Binding<String> {
         Binding(
             get: { text },
             set: { value in
-                let filtered = value.filter { $0.isNumber || $0 == ":" }
-                text = String(filtered.prefix(5))
+                text = formattedInputText(value)
             }
         )
     }
 
-    /// 按指定分钟数循环步进。
-    private func step(minutes: Int) {
-        let total = 24 * 60
-        minuteOfDay = (minuteOfDay + minutes + total) % total
-        text = formatted(minuteOfDay)
+    /// 输入时自动补冒号：0900 -> 09:00，1830 -> 18:30。
+    private func formattedInputText(_ value: String) -> String {
+        let digits = String(value.filter(\.isNumber).prefix(4))
+
+        guard digits.count > 2 else {
+            return digits
+        }
+
+        let hour = digits.prefix(2)
+        let minute = digits.dropFirst(2)
+
+        return "\(hour):\(minute)"
     }
 
-    /// 提交当前文本，非法输入回滚到当前值。
+    /// 按指定分钟数循环步进。
+    private func step(minutes: Int) {
+        commitIfNeededBeforeStepping()
+        let total = 24 * 60
+        minuteOfDay = (minuteOfDay + minutes + total) % total
+        lastValidMinute = clampedMinute(minuteOfDay)
+        text = formatted(lastValidMinute)
+    }
+
+    /// 步进前先提交当前文本，避免用户输入合法值后直接点箭头时丢失输入。
+    private func commitIfNeededBeforeStepping() {
+        guard isFocused else { return }
+        if let parsed = parse(text) {
+            minuteOfDay = parsed
+            lastValidMinute = parsed
+        } else {
+            rollbackInvalidInput()
+        }
+    }
+
+    /// 提交当前文本，非法输入回滚到上一次合法值。
     private func commitText() {
         if let parsed = parse(text) {
             minuteOfDay = parsed
+            lastValidMinute = parsed
             text = formatted(parsed)
         } else {
-            text = formatted(minuteOfDay)
+            rollbackInvalidInput()
         }
     }
 
-    /// 解析 HH:mm 或 HHmm 格式。
+    /// 回滚非法输入并通知外层显示提示。
+    private func rollbackInvalidInput() {
+        minuteOfDay = lastValidMinute
+        text = formatted(lastValidMinute)
+        onInvalidInput()
+    }
+
+    /// 解析 4 位数字时间：0900 / 1830，同时兼容已格式化后的 09:00 / 18:30。
     private func parse(_ value: String) -> Int? {
-        let hour: Int
-        let minute: Int
-        if value.contains(":") {
-            let parts = value.split(separator: ":", omittingEmptySubsequences: false)
-            guard parts.count == 2, let parsedHour = Int(parts[0]), let parsedMinute = Int(parts[1]) else {
-                return nil
-            }
-            hour = parsedHour
-            minute = parsedMinute
-        } else {
-            let digits = value.filter(\.isNumber)
-            guard digits.count == 4 else { return nil }
-            let hourText = String(digits.prefix(2))
-            let minuteText = String(digits.suffix(2))
-            guard let parsedHour = Int(hourText), let parsedMinute = Int(minuteText) else {
-                return nil
-            }
-            hour = parsedHour
-            minute = parsedMinute
+        let digits = String(value.filter(\.isNumber).prefix(4))
+
+        guard digits.count == 4 else {
+            return nil
         }
 
-        guard (0..<24).contains(hour), (0..<60).contains(minute) else { return nil }
+        let hourText = String(digits.prefix(2))
+        let minuteText = String(digits.suffix(2))
+
+        guard let hour = Int(hourText),
+              let minute = Int(minuteText),
+              (0..<24).contains(hour),
+              (0..<60).contains(minute) else {
+            return nil
+        }
         return hour * 60 + minute
     }
 
     /// 格式化为 24 小时制 HH:mm。
     private func formatted(_ minute: Int) -> String {
-        let clamped = min(max(minute, 0), 24 * 60 - 1)
+        let clamped = clampedMinute(minute)
         return String(format: "%02d:%02d", clamped / 60, clamped % 60)
+    }
+
+    /// 将分钟数限制在一天内，避免外部异常值影响展示。
+    private func clampedMinute(_ minute: Int) -> Int {
+        min(max(minute, 0), 24 * 60 - 1)
     }
 }
 
@@ -943,7 +1061,8 @@ private enum SettingsLayout {
     static let rowHeight: CGFloat = 42
     static let numericTextWidth: CGFloat = 44
     static let unitWidth: CGFloat = 28
-    static let timeInlineWidth: CGFloat = 96
+    static let timeInlineWidth: CGFloat = 102
+    static let timeTextWidth: CGFloat = 62
     static let toggleWidth: CGFloat = 58
     static let menuPickerWidth: CGFloat = 130
     static let repeatSegmentedWidth: CGFloat = 164

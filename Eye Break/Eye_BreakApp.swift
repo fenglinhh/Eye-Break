@@ -18,9 +18,6 @@ struct Eye_BreakApp: App {
         // 菜单栏入口：resting 阶段显示休息图标+倒计时，计数模式仅显示文本，否则显示普通眼睛图标
         MenuBarExtra {
             MenuBarView(model: model)
-                .onAppear {
-                    model.start()
-                }
         } label: {
             Group {
                 if case .resting = model.phase {
@@ -46,9 +43,6 @@ struct Eye_BreakApp: App {
         // 设置面板：Cmd+, 快捷键打开，formStyle(.grouped) 符合 macOS 标准
         Settings {
             SettingsView(model: model)
-                .onAppear {
-                    model.start()
-                }
         }
     }
 
