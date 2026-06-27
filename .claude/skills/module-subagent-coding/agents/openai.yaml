@@ -1,4 +1,0 @@
-interface:
-  display_name: "模块子代理编码"
-  short_description: "主Agent定框架，子Agent实现代码，主Agent测试验收"
-  default_prompt: "按模块子代理编码流程实现当前代码修改。"

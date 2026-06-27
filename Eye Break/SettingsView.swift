@@ -93,7 +93,7 @@ struct SettingsView: View {
             }
         }
         // 外部设置变化且本页没有未保存修改时，同步刷新草稿
-        .onChange(of: model.settings) { _, newSettings in
+        .onChange(of: model.settings) { newSettings in
             guard !hasChanges else { return }
             let settings = normalizedSettingsForSettingsPage(newSettings)
             baselineSettings = settings
@@ -942,13 +942,13 @@ private struct TimeInlineControl: View {
             lastValidMinute = clampedMinute(minuteOfDay)
             text = formatted(lastValidMinute)
         }
-        .onChange(of: minuteOfDay) { _, newValue in
+        .onChange(of: minuteOfDay) { newValue in
             let clamped = clampedMinute(newValue)
             lastValidMinute = clamped
             guard !isFocused else { return }
             text = formatted(clamped)
         }
-        .onChange(of: isFocused) { _, focused in
+        .onChange(of: isFocused) { focused in
             if focused {
                 lastValidMinute = clampedMinute(minuteOfDay)
                 text = formatted(lastValidMinute)
@@ -1053,7 +1053,7 @@ private struct TimeInlineControl: View {
 }
 
 /// 设置页布局常量，集中约束窗口宽度、内容宽度和右侧控制列。
-private enum SettingsLayout {
+enum SettingsLayout {
     static let windowWidth: CGFloat = 690
     static let windowHeight: CGFloat = 690
     static let contentWidth: CGFloat = 590

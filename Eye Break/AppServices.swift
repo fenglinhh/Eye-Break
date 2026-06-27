@@ -50,24 +50,30 @@ final class NotificationService {
 /// 1. 通过 SMAppService.mainApp 的 register/unregister 控制开机自启
 /// 2. apply(enabled:) 根据入参决定注册或注销，并检查当前状态避免重复操作
 final class LaunchAtLoginService {
+    /// 登录项系统调用可能触发 LaunchServices/ServiceManagement 内部等待，放到串行队列避免阻塞主线程。
+    private let queue = DispatchQueue(label: "com.dailybreak.launch-at-login", qos: .userInitiated)
+
     /// 应用登录自启设置
     ///
     /// 逻辑：
-    /// 1. enabled 为 true 且当前状态不为 .enabled 时执行 register
-    /// 2. enabled 为 false 且当前状态为 .enabled 时执行 unregister
-    /// 3. 捕获异常并记录日志，不向上抛出
+    /// 1. 将 ServiceManagement 调用派发到 userInitiated 串行队列，避免主线程被系统服务等待拖住
+    /// 2. enabled 为 true 且当前状态不为 .enabled 时执行 register
+    /// 3. enabled 为 false 且当前状态为 .enabled 时执行 unregister
+    /// 4. 捕获异常并记录日志，不向上抛出
     /// - Parameter enabled: 是否启用开机自启
     func apply(enabled: Bool) {
-        do {
-            if enabled {
-                if SMAppService.mainApp.status != .enabled {
-                    try SMAppService.mainApp.register()
+        queue.async {
+            do {
+                if enabled {
+                    if SMAppService.mainApp.status != .enabled {
+                        try SMAppService.mainApp.register()
+                    }
+                } else if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
                 }
-            } else if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
+            } catch {
+                NSLog("Daily Break launch-at-login update failed: \(error.localizedDescription)")
             }
-        } catch {
-            NSLog("Daily Break launch-at-login update failed: \(error.localizedDescription)")
         }
     }
 }

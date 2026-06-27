@@ -40,10 +40,8 @@ struct Eye_BreakApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        // 设置面板：Cmd+, 快捷键打开，formStyle(.grouped) 符合 macOS 标准
-        Settings {
-            SettingsView(model: model)
-        }
+        // 设置面板：通过自定义 NSWindow 管理，避免 SwiftUI Settings scene 在 macOS 26 的兼容问题
+        // 窗口由 MenuBarView 中的 openSettingsWindow() 手动创建和展示
     }
 
     /// 将应用设为纯菜单栏模式（无 Dock 图标）

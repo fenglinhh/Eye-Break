@@ -7,6 +7,7 @@
 //  被使用：EntryPoint.swift 中通过 MenuBarExtra 加载
 //
 
+import AppKit
 import SwiftUI
 
 /// 菜单栏弹出面板的主视图，采用卡片式现代设计
@@ -20,7 +21,6 @@ import SwiftUI
 struct MenuBarView: View {
     @ObservedObject var model: DailyBreakModel
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openSettings) private var openSettings
 
     /// 垂直排列各子视图，整体覆盖毛玻璃 + 渐变背景
     var body: some View {
@@ -33,7 +33,7 @@ struct MenuBarView: View {
         .padding(.horizontal, 16)
         .padding(.top, 18)
         .padding(.bottom, 16)
-        .frame(width: 320)
+        .frame(width: MenuPanelMetrics.width)
         .background(panelBackground)
         .overlay(alignment: .bottom) {
             // 有 toast 消息时在面板底部做一个浮动胶囊浮层
@@ -42,6 +42,9 @@ struct MenuBarView: View {
                     .padding(.bottom, 8)
             }
         }
+        // macOS 13 的 MenuBarExtra 宿主不会总是按背景形状裁剪内容，显式裁剪保证各版本圆角一致。
+        .clipShape(MenuPanelMetrics.panelShape)
+        .contentShape(MenuPanelMetrics.panelShape)
     }
 
     // MARK: - 子视图
@@ -98,9 +101,9 @@ struct MenuBarView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
-        .background(.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(.white.opacity(0.58), in: MenuPanelMetrics.cardShape)
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            MenuPanelMetrics.cardShape
                 .stroke(.white.opacity(0.6), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.05), radius: 10, x: 0, y: 5)
@@ -148,8 +151,7 @@ struct MenuBarView: View {
             MenuActionRow(title: "设置", systemImage: "gearshape.fill", tint: .dailyGray) {
                 closeMenuWindow()
                 DispatchQueue.main.async {
-                    openSettings()
-                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    openSettingsWindow()
                 }
             }
 
@@ -161,12 +163,41 @@ struct MenuBarView: View {
         }
     }
 
+    /// 打开设置窗口：使用自定义 NSWindow 承载 SettingsView。
+    ///
+    /// 逻辑：
+    /// 1. 若已有设置窗口且可见，则直接提到前台，避免重复创建
+    /// 2. 否则创建 NSWindow + NSHostingView 承载 SettingsView
+    /// 3. 窗口关闭时清空 manager 引用，下次点击重新创建
+    /// 4. 放弃 SwiftUI Settings scene 的 showSettingsWindow: selector，该私有 API 在 macOS 26
+    ///    上已失效，改用完全受控的 NSWindow 方式确保跨版本兼容
+    private func openSettingsWindow() {
+        if let existing = SettingsWindowManager.shared.window, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let settingsView = SettingsView(model: model)
+        let hostingController = NSHostingController(rootView: settingsView)
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "Daily Break 设置"
+        window.setContentSize(NSSize(width: SettingsLayout.windowWidth, height: SettingsLayout.windowHeight))
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        SettingsWindowManager.shared.window = window
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
     /// 面板背景：ultraThinMaterial + 蓝白渐变 + 白色描边 + 阴影
     private var panelBackground: some View {
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
+        MenuPanelMetrics.panelShape
             .fill(.ultraThinMaterial)
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                MenuPanelMetrics.panelShape
                     .fill(
                         LinearGradient(
                             colors: [
@@ -180,7 +211,7 @@ struct MenuBarView: View {
                     )
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                MenuPanelMetrics.panelShape
                     .stroke(.white.opacity(0.72), lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.13), radius: 18, x: 0, y: 10)
@@ -303,10 +334,10 @@ private struct ActionGroup<Content: View>: View {
         VStack(spacing: 0) {
             content
         }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .background(.white.opacity(0.46), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .clipShape(MenuPanelMetrics.groupClipShape)
+        .background(.white.opacity(0.46), in: MenuPanelMetrics.groupShape)
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            MenuPanelMetrics.groupShape
                 .stroke(.white.opacity(0.5), lineWidth: 1)
         }
     }
@@ -400,6 +431,32 @@ private struct ToastView: View {
     }
 }
 
+// MARK: - 布局常量
+
+private enum MenuPanelMetrics {
+    static let width: CGFloat = 320
+    static let panelCornerRadius: CGFloat = 20
+    static let cardCornerRadius: CGFloat = 14
+    static let groupCornerRadius: CGFloat = 14
+    static let groupClipCornerRadius: CGFloat = 16
+
+    static var panelShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: panelCornerRadius, style: .continuous)
+    }
+
+    static var cardShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
+    }
+
+    static var groupShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: groupCornerRadius, style: .continuous)
+    }
+
+    static var groupClipShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: groupClipCornerRadius, style: .continuous)
+    }
+}
+
 // MARK: - 颜色扩展
 
 /// 每日面板统一配色：文字色、品牌色、背景色和辅助色
@@ -415,4 +472,31 @@ private extension Color {
     static let dailySeparator = Color(red: 0.72, green: 0.76, blue: 0.78).opacity(0.24)
     static let dailyPanelBlue = Color(red: 0.78, green: 0.91, blue: 0.94)
     static let dailyWarmWhite = Color(red: 0.98, green: 0.94, blue: 0.87)
+}
+
+// MARK: - 设置窗口管理
+
+/// 持有设置窗口的弱引用，避免重复创建多个设置面板。
+///
+/// 逻辑：
+/// 1. 单例持有当前窗口弱引用
+/// 2. 窗口关闭时自动清空引用（通过 NotificationCenter 监听）
+/// 3. 下次点击"设置"时检测到引用为空，重新创建
+final class SettingsWindowManager {
+    static let shared = SettingsWindowManager()
+    weak var window: NSWindow?
+
+    private init() {
+        // 监听窗口关闭事件，自动清空引用
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let closingWindow = notification.object as? NSWindow,
+                  closingWindow === self.window else { return }
+            self.window = nil
+        }
+    }
 }

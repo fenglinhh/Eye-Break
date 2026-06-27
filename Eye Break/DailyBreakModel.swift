@@ -71,6 +71,8 @@ final class DailyBreakModel: ObservableObject {
     private var hasStarted = false
     /// 标记 overlay 当前是否已显示（用于决定调用 show/update/close）
     private var isOverlayVisible = false
+    /// 最近一次已持久化的统计快照；统计未变化时不重复写 UserDefaults。
+    private var lastPersistedStats: BreakStats?
 
     // MARK: - 初始化
 
@@ -106,9 +108,11 @@ final class DailyBreakModel: ObservableObject {
         self.systemMonitor = systemMonitor
         self.launchAtLogin = launchAtLogin
         let loadedSettings = store.loadSettings()
+        let loadedStats = store.loadStats()
         self.settings = loadedSettings
         self.engine = BreakTimerEngine(settings: loadedSettings)
-        self.engine.restoreStats(store.loadStats())
+        self.engine.restoreStats(loadedStats)
+        self.lastPersistedStats = loadedStats
         bindServices()
         syncFromEngine()
     }
@@ -303,7 +307,7 @@ final class DailyBreakModel: ObservableObject {
         remainingSeconds = engine.remainingSeconds
         todayShortBreaks = engine.todayShortBreaks
         todayLongBreaks = engine.todayLongBreaks
-        store.saveStats(engine.stats)
+        persistStatsIfNeeded(engine.stats)
 
         // 消费 preBreak 通知标识：engine 在倒计时 ≤ 30 秒时置位此标识
         if engine.consumePreBreakNotificationFlag() {
@@ -334,6 +338,18 @@ final class DailyBreakModel: ObservableObject {
             }
             currentAdvice = nil
         }
+    }
+
+    /// 按需持久化统计数据。
+    ///
+    /// 逻辑：
+    /// 1. engine 每秒 tick，但每日统计只在完成/跳过/跨天等事件中变化
+    /// 2. 统计未变化时跳过 JSON 编码和 UserDefaults 写入，降低主线程 I/O 压力
+    /// 3. 写入成功后更新本地快照，后续 tick 不再重复写同一份数据
+    private func persistStatsIfNeeded(_ stats: BreakStats) {
+        guard stats != lastPersistedStats else { return }
+        store.saveStats(stats)
+        lastPersistedStats = stats
     }
 
     // MARK: - Overlay 状态构造
