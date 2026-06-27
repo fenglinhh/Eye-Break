@@ -2,6 +2,16 @@
 
 一个 macOS 菜单栏应用，定时提醒你休息眼睛，远离屏幕疲劳。
 
+## 应用预览
+
+| 菜单栏控制面板 | 设置界面 |
+| --- | --- |
+| <img src="docs/screenshots/control-panel.png" alt="Eye Break 菜单栏控制面板" width="360"> | <img src="docs/screenshots/settings.png" alt="Eye Break 设置界面" width="640"> |
+
+### 全屏休息提醒
+
+![Eye Break 全屏休息提醒](docs/screenshots/break-overlay.png)
+
 ## 适用场景
 
 专为长时间面对电脑的**办公/工作场景**设计。按照设定的工作周期，自动弹出全屏休息界面，强制你离开屏幕放松眼睛。
