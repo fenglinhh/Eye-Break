@@ -34,6 +34,7 @@ struct Eye_BreakApp: App {
                     Image(systemName: "eye")
                 }
             }
+            .foregroundStyle(model.isProjecting ? Color.yellow : Color.primary)
             .onAppear {
                 model.start()
             }

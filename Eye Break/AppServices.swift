@@ -2,47 +2,16 @@
 //  AppServices.swift
 //  Eye Break
 //
-//  职责：提供应用所需的基础服务层，包括系统通知、登录项管理、系统事件监听和全屏休息蒙层控制。
-//  依赖：UserNotifications、ServiceManagement、AppKit、SwiftUI
+//  职责：提供应用所需的基础服务层，包括登录项管理、系统事件监听、投影检测和全屏休息蒙层控制。
+//  依赖：ServiceManagement、AppKit、SwiftUI
 //  被使用：DailyBreakModel（在 setupServices 中初始化并持有全部服务实例）
 //
 
 import AppKit
 import Combine
+import CoreGraphics
 import ServiceManagement
 import SwiftUI
-import UserNotifications
-
-/// 本地通知服务
-///
-/// 逻辑：
-/// 1. requestAuthorization 在应用启动时请求通知权限
-/// 2. sendPreBreakNotification 在休息倒计时到达 30 秒时发送提醒通知
-/// 3. 使用固定标识符 "daily-break.pre-break"，同一标识符会覆盖前一条通知，避免通知堆积
-final class NotificationService {
-    /// 请求发送本地通知的授权（弹窗与声音）
-    func requestAuthorization() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-    }
-
-    /// 发送"30 秒后开始休息"的本地通知
-    ///
-    /// 逻辑：
-    /// 1. 创建 UNMutableNotificationContent，设置标题和副标题
-    /// 2. 根据 playSound 参数决定是否附带声音
-    /// 3. 使用固定标识符创建请求并提交，同 ID 自动覆盖前一条
-    /// - Parameter playSound: 是否播放通知声音
-    func sendPreBreakNotification(playSound: Bool) {
-        let content = UNMutableNotificationContent()
-        content.title = "30 秒后开始休息"
-        content.subtitle = "可以先保存一下当前工作"
-        if playSound {
-            content.sound = .default
-        }
-        let request = UNNotificationRequest(identifier: "daily-break.pre-break", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
-    }
-}
 
 /// 登录自启管理服务
 ///
@@ -142,6 +111,66 @@ final class SystemActivityMonitor {
         // 清理分布式通知中心观察者
         for observer in distributedObservers {
             DistributedNotificationCenter.default().removeObserver(observer)
+        }
+    }
+}
+
+/// 投影/外接显示状态监听器。
+///
+/// 逻辑：
+/// 1. 启动时读取当前在线显示器状态
+/// 2. 监听 NSApplication.didChangeScreenParametersNotification
+/// 3. 检测到外接/投屏显示器数量大于 1，或任一显示器处于镜像集合时，视为投影中
+/// 4. 状态变化时只发一次 started/ended 回调，避免重复冻结或恢复
+final class ProjectionMonitor {
+    var onProjectionStarted: (() -> Void)?
+    var onProjectionEnded: (() -> Void)?
+
+    private var observer: NSObjectProtocol?
+    private(set) var isProjecting = false
+
+    func start() {
+        guard observer == nil else { return }
+        isProjecting = Self.detectProjection()
+        observer = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshProjectionState()
+        }
+        if isProjecting {
+            onProjectionStarted?()
+        }
+    }
+
+    deinit {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func refreshProjectionState() {
+        let nextState = Self.detectProjection()
+        guard nextState != isProjecting else { return }
+        isProjecting = nextState
+        if nextState {
+            onProjectionStarted?()
+        } else {
+            onProjectionEnded?()
+        }
+    }
+
+    private static func detectProjection() -> Bool {
+        var displayCount: UInt32 = 0
+        CGGetOnlineDisplayList(0, nil, &displayCount)
+        guard displayCount > 0 else { return NSScreen.screens.count > 1 }
+        if displayCount > 1 { return true }
+
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+        CGGetOnlineDisplayList(displayCount, &displays, &displayCount)
+        return displays.prefix(Int(displayCount)).contains { display in
+            CGDisplayIsInMirrorSet(display) != 0
         }
     }
 }

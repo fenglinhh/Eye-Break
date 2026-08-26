@@ -5,8 +5,8 @@
 //  职责：应用中唯一的 ViewModel，通过 @MainActor ObservableObject 桥接
 //  纯状态机 BreakTimerEngine 与 SwiftUI 视图层。
 //  持有引擎实例和所有服务实例，通过 1 秒 Timer 驱动 engine.tick() → syncFromEngine() 循环。
-//  依赖：BreakTimerEngine, DailyBreakStore, NotificationService, RestOverlayController,
-//        SystemActivityMonitor, LaunchAtLoginService
+//  依赖：BreakTimerEngine, DailyBreakStore, RestOverlayController, PreBreakReminderController,
+//        SystemActivityMonitor, ProjectionMonitor, LaunchAtLoginService
 //  被使用：MenuBarView, SettingsView（通过 @ObservedObject / @EnvironmentObject）
 //
 
@@ -20,7 +20,7 @@ import SwiftUI
 /// 1. 创建时从 store 加载配置和统计，初始化 engine
 /// 2. start() 后启动 1 秒 Timer，每秒 tick() → engine.tick() → syncFromEngine()
 /// 3. syncFromEngine() 将 engine 内部状态同步到 @Published 属性驱动视图刷新
-/// 4. 负责消费 engine 的"一次性标识"（通知/toast/overlay），调度对应服务
+/// 4. 负责消费 engine 的"一次性标识"（toast/overlay），调度对应服务
 @MainActor
 final class DailyBreakModel: ObservableObject {
     // MARK: - 发布属性（驱动 SwiftUI 视图刷新）
@@ -43,17 +43,21 @@ final class DailyBreakModel: ObservableObject {
     @Published private(set) var todayLongBreaks = 0
     /// Toast 浮层消息（显示 3 秒后自动清除）
     @Published var toastMessage: String?
+    /// 当前是否检测到投影/外接显示状态
+    @Published private(set) var isProjecting = false
 
     // MARK: - 服务实例
 
     /// 持久化存储（UserDefaults JSON）
     private let store: DailyBreakStore
-    /// 本地通知服务（preBreak 提醒）
-    private let notifications: NotificationService
     /// 全屏休息蒙层控制器（每个屏幕一个 NSWindow）
     private let overlayController: RestOverlayController
+    /// 休息前 30 秒的右下角轻提示窗口
+    private let preBreakReminderController: PreBreakReminderController
     /// 系统事件监听（睡眠/锁屏/会话切换）
     private let systemMonitor: SystemActivityMonitor
+    /// 投影/外接显示状态监听
+    private let projectionMonitor: ProjectionMonitor
     /// 登录自启管理
     private let launchAtLogin: LaunchAtLoginService
 
@@ -73,6 +77,8 @@ final class DailyBreakModel: ObservableObject {
     private var isOverlayVisible = false
     /// 最近一次已持久化的统计快照；统计未变化时不重复写 UserDefaults。
     private var lastPersistedStats: BreakStats?
+    /// 标记当前 systemAway 是否由投影检测触发，避免误恢复锁屏/睡眠暂停。
+    private var isProjectionPauseActive = false
 
     // MARK: - 初始化
 
@@ -80,9 +86,10 @@ final class DailyBreakModel: ObservableObject {
     convenience init() {
         self.init(
             store: DailyBreakStore(),
-            notifications: NotificationService(),
             overlayController: RestOverlayController(),
+            preBreakReminderController: PreBreakReminderController(),
             systemMonitor: SystemActivityMonitor(),
+            projectionMonitor: ProjectionMonitor(),
             launchAtLogin: LaunchAtLoginService()
         )
     }
@@ -97,15 +104,17 @@ final class DailyBreakModel: ObservableObject {
     /// 5. 执行首次 syncFromEngine 初始化发布属性
     init(
         store: DailyBreakStore,
-        notifications: NotificationService,
         overlayController: RestOverlayController,
+        preBreakReminderController: PreBreakReminderController,
         systemMonitor: SystemActivityMonitor,
+        projectionMonitor: ProjectionMonitor,
         launchAtLogin: LaunchAtLoginService
     ) {
         self.store = store
-        self.notifications = notifications
         self.overlayController = overlayController
+        self.preBreakReminderController = preBreakReminderController
         self.systemMonitor = systemMonitor
+        self.projectionMonitor = projectionMonitor
         self.launchAtLogin = launchAtLogin
         let loadedSettings = store.loadSettings()
         let loadedStats = store.loadStats()
@@ -128,19 +137,19 @@ final class DailyBreakModel: ObservableObject {
     /// 启动模型（应用启动时调用一次）。
     ///
     /// 逻辑：
-    /// 1. 请求通知权限
-    /// 2. 应用登录自启设置
-    /// 3. 启动系统事件监听
-    /// 4. 调用 engine.startIfAllowed() 根据当前时间决定是否开始周期
+    /// 1. 应用登录自启设置
+    /// 2. 启动系统事件监听
+    /// 3. 调用 engine.startIfAllowed() 根据当前时间决定是否开始周期
+    /// 4. 启动投影检测，投影中会冻结当前倒计时
     /// 5. 创建 1 秒重复 Timer，驱动 engine.tick() + syncFromEngine()
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
-        notifications.requestAuthorization()
         launchAtLogin.apply(enabled: settings.launchAtLogin)
         systemMonitor.start()
         engine.startIfAllowed()
         syncFromEngine()
+        projectionMonitor.start()
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.tick()
@@ -201,7 +210,7 @@ final class DailyBreakModel: ObservableObject {
         case .paused:
             return "已暂停 \(formatDuration(engine.totalPausedSeconds)) · 剩余 \(formatDuration(remainingSeconds))"
         case .systemAway:
-            return "锁屏或睡眠暂停中"
+            return isProjecting ? "投影中，已暂停；退出投影后自动继续" : "锁屏或睡眠暂停中"
         case .postponed:
             return "已延后 · \(formatDuration(remainingSeconds)) 后提醒"
         }
@@ -221,6 +230,16 @@ final class DailyBreakModel: ObservableObject {
         default:
             return formatDuration(remainingSeconds)
         }
+    }
+
+    /// 是否显示屏幕右下角临近休息提示。
+    ///
+    /// 逻辑：
+    /// 1. 只在 preBreak 阶段显示，避免工作早期持续占用屏幕空间
+    /// 2. 剩余时间限定在 1...30 秒，休息真正开始、暂停或非活跃时自动消失
+    /// 3. 不受 menuBarCountdownEnabled 影响；这是临近休息的强提示，不是普通菜单栏倒计时
+    var shouldShowPreBreakScreenReminder: Bool {
+        phase == .preBreak && (1...30).contains(remainingSeconds)
     }
 
     /// 下一次休息类型提示（仅 breakCycleEnabled 时显示）。
@@ -278,6 +297,41 @@ final class DailyBreakModel: ObservableObject {
                 self?.syncFromEngine()
             }
         }
+        projectionMonitor.onProjectionStarted = { [weak self] in
+            Task { @MainActor in
+                self?.handleProjectionStarted()
+            }
+        }
+        projectionMonitor.onProjectionEnded = { [weak self] in
+            Task { @MainActor in
+                self?.handleProjectionEnded()
+            }
+        }
+    }
+
+    /// 进入投影：冻结当前倒计时，并让状态栏显示黄色状态。
+    private func handleProjectionStarted() {
+        isProjecting = true
+        guard !isProjectionPauseActive else {
+            syncFromEngine()
+            return
+        }
+        let previousPhase = engine.phase
+        engine.systemWillSleepOrLock()
+        isProjectionPauseActive = previousPhase != .systemAway && engine.phase == .systemAway
+        syncFromEngine()
+    }
+
+    /// 退出投影：仅恢复由投影触发的冻结，避免误恢复锁屏/睡眠暂停。
+    private func handleProjectionEnded() {
+        isProjecting = false
+        guard isProjectionPauseActive else {
+            syncFromEngine()
+            return
+        }
+        isProjectionPauseActive = false
+        engine.systemDidWakeOrUnlock()
+        syncFromEngine()
     }
 
     // MARK: - 核心循环
@@ -295,7 +349,7 @@ final class DailyBreakModel: ObservableObject {
     /// 逻辑：
     /// 1. 复制 engine 的 phase、剩余秒数、休息计数到 @Published 属性触发 UI 刷新
     /// 2. 保存最新统计到 store
-    /// 3. 消费 engine 的 preBreak 通知标识 → 如果有，发送本地通知
+    /// 3. 消费 engine 的 preBreak 通知标识，防止一次性标识积压；不再发送系统通知
     /// 4. 消费 engine 的 toast 消息 → 如果有，显示 3 秒 toast
     /// 5. 处理 overlay 生命周期：
     ///    a. 若 phase 是 resting 且 engine 说应显示 → 调用 overlayController.show() 创建/展示蒙层
@@ -309,14 +363,19 @@ final class DailyBreakModel: ObservableObject {
         todayLongBreaks = engine.todayLongBreaks
         persistStatsIfNeeded(engine.stats)
 
-        // 消费 preBreak 通知标识：engine 在倒计时 ≤ 30 秒时置位此标识
-        if engine.consumePreBreakNotificationFlag() {
-            notifications.sendPreBreakNotification(playSound: settings.playSound)
-        }
+        // 仅消费 preBreak 通知标识；当前版本使用屏幕浮层提示，不再申请权限或发送系统通知。
+        _ = engine.consumePreBreakNotificationFlag()
 
         // 消费 toast 消息（跳过/延后时生成）
         if let message = engine.consumeToast() {
             showToast(message)
+        }
+
+        // 处理休息前右下角轻提示：仅在最后 30 秒显示，休息开始或状态切换时关闭
+        if shouldShowPreBreakScreenReminder {
+            preBreakReminderController.showOrUpdate(seconds: remainingSeconds)
+        } else {
+            preBreakReminderController.close()
         }
 
         // 处理全屏蒙层生命周期

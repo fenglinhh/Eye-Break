@@ -6,7 +6,7 @@ APP_NAME="Eye Break"
 SCHEME_NAME="Eye Break"
 PROJECT_NAME="Eye Break.xcodeproj"
 CONFIGURATION="Release"
-VERSION="0.1.0"
+VERSION="1.1.0"
 DMG_NAME="EyeBreak-v${VERSION}-universal.dmg"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,7 +67,7 @@ xcodebuild \
 [[ -d "${APP_PATH}" ]] || fail "Built app not found: ${APP_PATH}"
 
 log "Staging app"
-ditto "${APP_PATH}" "${SIGNED_APP_PATH}"
+ditto --noextattr --noqtn "${APP_PATH}" "${SIGNED_APP_PATH}"
 
 [[ -f "${BINARY_PATH}" ]] || fail "Main binary not found: ${BINARY_PATH}"
 
@@ -79,7 +79,11 @@ if [[ " ${ARCHS_OUTPUT} " != *" arm64 "* || " ${ARCHS_OUTPUT} " != *" x86_64 "* 
 fi
 
 log "Ad-hoc codesigning app"
+find "${SIGNED_APP_PATH}" \( -name ".DS_Store" -o -name "._*" \) -delete
 xattr -cr "${SIGNED_APP_PATH}"
+xattr -d "com.apple.FinderInfo" "${SIGNED_APP_PATH}" 2>/dev/null || true
+xattr -d "com.apple.fileprovider.fpfs#P" "${SIGNED_APP_PATH}" 2>/dev/null || true
+xattr -d "com.apple.provenance" "${SIGNED_APP_PATH}" 2>/dev/null || true
 codesign --force --deep --sign - "${SIGNED_APP_PATH}"
 codesign --verify --deep --strict --verbose=2 "${SIGNED_APP_PATH}"
 
